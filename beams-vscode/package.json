@@ -2,7 +2,7 @@
   "name": "teleport-beams",
   "displayName": "Teleport Beams",
   "description": "Manage and connect to Teleport Beams from VS Code",
-  "version": "0.1.14",
+  "version": "0.2.0",
   "publisher": "teleport",
   "license": "Apache-2.0",
   "repository": {
