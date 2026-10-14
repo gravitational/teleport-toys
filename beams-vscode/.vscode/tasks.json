@@ -1,0 +1,22 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "install-and-compile",
+      "type": "shell",
+      "command": "npm install && npm run compile",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": "$tsc",
+      "presentation": {
+        "reveal": "silent",
+        "panel": "shared"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}

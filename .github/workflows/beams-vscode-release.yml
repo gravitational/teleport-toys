@@ -1,0 +1,47 @@
+name: beams-vscode Release
+
+on:
+  push:
+    tags:
+      - "beams-vscode-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: beams-vscode
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: beams-vscode/package-lock.json
+
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/beams-vscode-v')
+        run: npm version "${GITHUB_REF_NAME#beams-vscode-v}" --no-git-tag-version --allow-same-version
+
+      - run: npm ci
+
+      - run: npm test
+
+      - run: npm run package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: beams-vscode/*.vsix
+
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/beams-vscode-v')
+        with:
+          files: beams-vscode/*.vsix
+          generate_release_notes: true
