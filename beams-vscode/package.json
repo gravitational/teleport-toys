@@ -2,8 +2,8 @@
   "name": "teleport-beams",
   "displayName": "Teleport Beams",
   "description": "Manage and connect to Teleport Beams from VS Code",
-  "version": "0.2.0",
-  "publisher": "teleport",
+  "version": "0.2.1",
+  "publisher": "goTeleport",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
