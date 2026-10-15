@@ -4,7 +4,7 @@ Manage and connect to Teleport Beams directly from VS Code. Create, monitor, and
 
 This directory contains the source for the extension — there is no separate server component. Everything is driven through the `tsh` CLI (see `src/tsh.ts`), which the extension shells out to for beam lifecycle, file access, git operations, and cluster status.
 
-This project lives in [`gravitational/teleport-toys`](https://github.com/gravitational/teleport-toys), Teleport's collection of small open-source projects and experiments. It was previously developed independently at `cassiebreviu/beam-vs-code`.
+This project lives in [`gravitational/teleport-toys`](https://github.com/gravitational/teleport-toys), Teleport's collection of small open-source projects and experiments. 
 
 ## Features
 
