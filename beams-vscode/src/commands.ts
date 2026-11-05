@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
 import { BeamItem, setBeamLabel } from './beamItem';
 import { BeamsProvider } from './beamsProvider';
-import { BeamFileExplorer } from './fileExplorer';
-import { addBeam, removeBeam, publishBeam, unpublishBeam, execOnBeam, scpFromBeam, checkStatus, listBeams, waitForBeamReady, detectRepoRoot, tshErrorMessage, tshBinary } from './tsh';
-import { openBeamTerminal } from './terminal';
+import { PhasesProvider } from './phasesProvider';
+import { PhaseItem } from './phaseItem';
+import { BeamFileExplorer, FileItem } from './fileExplorer';
+import { addBeam, removeBeam, publishBeam, unpublishBeam, execOnBeam, scpFromBeam, checkStatus, listBeams, waitForBeamReady, detectRepoRoot, tshErrorMessage, tshBinary, listClusterProfiles, Phase, listPhases, listFailedPhaseSnapshots, removePhase } from './tsh';
+import { openBeamTerminal, openPhaseAddTerminal, openPhaseEditTerminal, openPhaseSnapshotTerminal, openPhaseApplyTerminal } from './terminal';
 import { reportTshError } from './notify';
 import { setupGithubOnBeam, autoSetupGithub, SECRET_KEY } from './github';
 import { ensureBeamSshConfig } from './ssh';
@@ -49,6 +51,7 @@ import * as os from 'os';
 export function registerCommands(
     context: vscode.ExtensionContext,
     provider: BeamsProvider,
+    phasesProvider: PhasesProvider,
     fileExplorer: BeamFileExplorer,
     eventsProvider: AgentEventsProvider,
     sessionProfilesProvider: SessionProfilesProvider,
@@ -56,6 +59,81 @@ export function registerCommands(
     _getScm?: () => import('./scm').BeamGitScmProvider | undefined,
     containerSync?: ContainerSyncEngine,
 ): void {
+    async function deletePhaseWithConfirm(name: string): Promise<void> {
+        const confirm = await vscode.window.showWarningMessage(
+            `Delete Phase "${name}"?`,
+            { modal: true },
+            'Delete'
+        );
+        if (confirm !== 'Delete') {
+            return;
+        }
+        try {
+            await removePhase(name);
+            vscode.window.showInformationMessage(`Phase "${name}" deleted.`);
+            phasesProvider.refresh();
+        } catch (err: unknown) {
+            reportTshError(err, { action: 'delete Phase', refresh: () => phasesProvider.refresh() });
+        }
+    }
+
+    // `tsh phase edit` opens a build console against the Phase's last successful snapshot.
+    // A Phase that's still building or whose last build failed has no such snapshot, and
+    // the CLI fails with "has no successful snapshot" — but that failure only ever shows up
+    // in the integrated terminal's transient exit banner, which is easy to miss. Catch the
+    // known-bad states up front and explain why, instead of letting the terminal fail silently.
+    function editPhase(phase: Phase): void {
+        if (phase.state === 'building') {
+            vscode.window.showWarningMessage(
+                `Phase "${phase.name}" is still building, so it has no successful snapshot to edit yet. Try again once the build finishes.`
+            );
+            return;
+        }
+        if (phase.state === 'failed') {
+            vscode.window.showWarningMessage(
+                `Phase "${phase.name}" has no successful build (last build failed), so there's no snapshot to edit.`
+            );
+            return;
+        }
+        openPhaseEditTerminal(phase.name);
+    }
+
+    async function managePhase(phase: Phase): Promise<void> {
+        const choice = await vscode.window.showQuickPick(
+            [
+                { label: '$(edit) Edit', description: 'Open build console to edit', action: 'edit' as const },
+                { label: '$(save) Snapshot', description: 'Save a snapshot to this Phase', action: 'snapshot' as const },
+                { label: '$(trash) Delete', description: 'Delete this Phase image', action: 'delete' as const },
+            ],
+            { placeHolder: `Phase: ${phase.name}` }
+        );
+        if (!choice) {
+            return;
+        }
+        switch (choice.action) {
+            case 'edit':
+                editPhase(phase);
+                break;
+            case 'snapshot':
+                openPhaseSnapshotTerminal(phase.name);
+                break;
+            case 'delete':
+                await deletePhaseWithConfirm(phase.name);
+                break;
+        }
+    }
+
+    async function createPhaseFlow(): Promise<void> {
+        const name = await vscode.window.showInputBox({
+            prompt: 'Name for the new Phase (optional)',
+            placeHolder: 'e.g. dev-tools',
+        });
+        if (name === undefined) {
+            return;
+        }
+        openPhaseAddTerminal(name || undefined);
+    }
+
     context.subscriptions.push(
         vscode.commands.registerCommand('beams.select', async (item: BeamItem) => {
             if (!item?.beam) {
@@ -73,6 +151,10 @@ export function registerCommands(
             provider.refresh();
         }),
 
+        vscode.commands.registerCommand('beams.refreshPhases', () => {
+            phasesProvider.refresh();
+        }),
+
         vscode.commands.registerCommand('beams.rename', async (item?: BeamItem) => {
             if (!item?.beam) { return; }
             const newName = await vscode.window.showInputBox({
@@ -86,13 +168,55 @@ export function registerCommands(
         }),
 
         vscode.commands.registerCommand('beams.login', async () => {
-            const cluster = await vscode.window.showInputBox({
-                prompt: 'Teleport cluster proxy address',
-                placeHolder: 'example.teleport.sh',
-            });
-            if (!cluster) {
-                return;
+            const NEW_CLUSTER = { label: '$(add) Enter a new cluster...', isNew: true as const, cluster: undefined as string | undefined };
+
+            let knownClusters: { cluster: string; active: boolean }[] = [];
+            try {
+                const data = await listClusterProfiles();
+                const seen = new Map<string, boolean>();
+                if (data.active?.cluster) {
+                    seen.set(data.active.cluster, true);
+                }
+                for (const p of data.profiles ?? []) {
+                    if (p.cluster && !seen.has(p.cluster)) {
+                        seen.set(p.cluster, false);
+                    }
+                }
+                knownClusters = [...seen].map(([cluster, active]) => ({ cluster, active }));
+            } catch {
+                // No known profiles (or tsh status failed) — fall straight through to manual entry.
             }
+
+            let cluster: string | undefined;
+            if (knownClusters.length > 0) {
+                const choice = await vscode.window.showQuickPick(
+                    [
+                        ...knownClusters.map(c => ({
+                            label: `$(server) ${c.cluster}`,
+                            description: c.active ? 'active' : undefined,
+                            isNew: false as const,
+                            cluster: c.cluster as string | undefined,
+                        })),
+                        NEW_CLUSTER,
+                    ],
+                    { placeHolder: 'Select a Teleport cluster to log in to' }
+                );
+                if (!choice) {
+                    return;
+                }
+                cluster = choice.cluster;
+            }
+
+            if (!cluster) {
+                cluster = await vscode.window.showInputBox({
+                    prompt: 'Teleport cluster proxy address',
+                    placeHolder: 'example.teleport.sh',
+                });
+                if (!cluster) {
+                    return;
+                }
+            }
+
             const terminal = vscode.window.createTerminal({
                 name: 'tsh login',
                 shellPath: tshBinary(),
@@ -103,6 +227,37 @@ export function registerCommands(
         }),
 
         vscode.commands.registerCommand('beams.create', async () => {
+            let phases: Phase[] = [];
+            try {
+                phases = await listPhases();
+            } catch (err: unknown) {
+                console.warn(`Beams: failed to list phases: ${tshErrorMessage(err)}`);
+            }
+
+            const choice = await vscode.window.showQuickPick(
+                [
+                    { label: '$(vm) Beam', description: 'Start a new ephemeral beam', createKind: 'beam' as const, phase: undefined as string | undefined },
+                    { label: '$(package) Phase', description: 'Build a reusable Phase image', createKind: 'phase' as const, phase: undefined as string | undefined },
+                    ...phases.map(p => ({
+                        label: `$(layers) Beam from Phase: ${p.name}`,
+                        description: `${p.state} · ${p.region}`,
+                        createKind: 'beam' as const,
+                        phase: p.name as string | undefined,
+                    })),
+                ],
+                { placeHolder: 'What would you like to create?' }
+            );
+            if (!choice) {
+                return;
+            }
+
+            if (choice.createKind === 'phase') {
+                await createPhaseFlow();
+                return;
+            }
+
+            const phaseName = choice.phase;
+
             // Ask whether to apply saved GitHub credentials
             let applyGithubCredentials = false;
             {
@@ -129,7 +284,7 @@ export function registerCommands(
                 const beam = await vscode.window.withProgress(
                     { location: vscode.ProgressLocation.Notification, title: 'Creating beam...' },
                     async (progress) => {
-                        const b = await addBeam();
+                        const b = await addBeam({ phase: phaseName });
                         progress.report({ message: 'Waiting for beam to be ready...' });
                         await waitForBeamReady(b.id);
                         try {
@@ -152,6 +307,69 @@ export function registerCommands(
                 provider.refresh();
             } catch (err: unknown) {
                 vscode.window.showErrorMessage(`Failed to create beam: ${tshErrorMessage(err)}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('beams.phase.create', async () => {
+            await createPhaseFlow();
+        }),
+
+        vscode.commands.registerCommand('beams.phase.manage', async (item: PhaseItem) => {
+            if (!item?.phase) {
+                return;
+            }
+            await managePhase(item.phase);
+        }),
+
+        vscode.commands.registerCommand('beams.phase.edit', (item: PhaseItem) => {
+            if (!item?.phase) {
+                return;
+            }
+            editPhase(item.phase);
+        }),
+
+        vscode.commands.registerCommand('beams.phase.snapshot', (item: PhaseItem) => {
+            if (!item?.phase) {
+                return;
+            }
+            openPhaseSnapshotTerminal(item.phase.name);
+        }),
+
+        vscode.commands.registerCommand('beams.phase.delete', async (item: PhaseItem) => {
+            if (!item?.phase) {
+                return;
+            }
+            await deletePhaseWithConfirm(item.phase.name);
+        }),
+
+        vscode.commands.registerCommand('beams.phase.apply', async () => {
+            const files = await vscode.window.showOpenDialog({
+                canSelectMany: false,
+                filters: { 'YAML': ['yaml', 'yml'] },
+                title: 'Select a Phase configuration YAML file',
+            });
+            if (!files || files.length === 0) {
+                return;
+            }
+            openPhaseApplyTerminal(files[0].fsPath);
+        }),
+
+        vscode.commands.registerCommand('beams.phase.viewFailedSnapshots', async () => {
+            try {
+                const failed = await listFailedPhaseSnapshots();
+                if (failed.length === 0) {
+                    vscode.window.showInformationMessage('No failed Phase build snapshots.');
+                    return;
+                }
+                await vscode.window.showQuickPick(
+                    failed.map(f => ({
+                        label: typeof f === 'object' && f && 'name' in f ? String((f as Record<string, unknown>).name) : JSON.stringify(f),
+                        description: typeof f === 'object' && f && 'last_error' in f ? String((f as Record<string, unknown>).last_error) : undefined,
+                    })),
+                    { placeHolder: 'Failed Phase build snapshots' }
+                );
+            } catch (err: unknown) {
+                reportTshError(err, { action: 'list failed Phase snapshots', refresh: () => phasesProvider.refresh() });
             }
         }),
 
@@ -264,6 +482,71 @@ export function registerCommands(
             fileExplorer.refresh();
         }),
 
+        vscode.commands.registerCommand('beams.uploadFiles', async (item?: FileItem) => {
+            if (!fileExplorer.getBeam()) {
+                vscode.window.showWarningMessage('Select a beam first.');
+                return;
+            }
+            const targetDir = item?.entry.path ?? '/home/beams';
+            const files = await vscode.window.showOpenDialog({
+                canSelectMany: true,
+                canSelectFiles: true,
+                canSelectFolders: true,
+                title: targetDir === '/home/beams' ? 'Select files to upload' : `Select files to upload to ${targetDir}`,
+            });
+            if (!files || files.length === 0) {
+                return;
+            }
+            await fileExplorer.uploadLocalFiles(targetDir, files);
+        }),
+
+        vscode.commands.registerCommand('beams.downloadFile', async (item: FileItem) => {
+            if (!item?.entry) {
+                return;
+            }
+            const beamUri = vscode.Uri.parse(`beam://${item.entry.beamId}${item.entry.path}`);
+            const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+
+            if (item.entry.isDirectory) {
+                const destFolder = await vscode.window.showOpenDialog({
+                    canSelectFiles: false,
+                    canSelectFolders: true,
+                    canSelectMany: false,
+                    title: `Select a destination for "${item.entry.name}"`,
+                });
+                if (!destFolder || destFolder.length === 0) {
+                    return;
+                }
+                const destUri = vscode.Uri.joinPath(destFolder[0], item.entry.name);
+                try {
+                    await vscode.window.withProgress(
+                        { location: vscode.ProgressLocation.Notification, title: `Downloading "${item.entry.name}"...` },
+                        () => vscode.workspace.fs.copy(beamUri, destUri, { overwrite: true })
+                    );
+                    vscode.window.showInformationMessage(`Downloaded to ${destUri.fsPath}.`);
+                } catch (err: unknown) {
+                    reportTshError(err, { beamId: item.entry.beamId, action: 'download folder' });
+                }
+                return;
+            }
+
+            const saveUri = await vscode.window.showSaveDialog({
+                defaultUri: vscode.Uri.file(path.join(homeDir, 'Downloads', item.entry.name)),
+                title: `Save "${item.entry.name}" as...`,
+            });
+            if (!saveUri) {
+                return;
+            }
+            try {
+                await vscode.window.withProgress(
+                    { location: vscode.ProgressLocation.Notification, title: `Downloading "${item.entry.name}"...` },
+                    () => vscode.workspace.fs.copy(beamUri, saveUri, { overwrite: true })
+                );
+                vscode.window.showInformationMessage(`Downloaded to ${saveUri.fsPath}.`);
+            } catch (err: unknown) {
+                reportTshError(err, { beamId: item.entry.beamId, action: 'download file' });
+            }
+        }),
 
         vscode.commands.registerCommand('beams.publish', async (item: BeamItem) => {
             if (!item) {
@@ -511,6 +794,14 @@ export function registerCommands(
             channel.appendLine('');
             channel.appendLine(item.detail);
             channel.show(true);
+        }),
+
+        vscode.commands.registerCommand('beams.events.expand', () => {
+            vscode.commands.executeCommand('beamEventsPanel.focus');
+        }),
+
+        vscode.commands.registerCommand('beams.events.collapse', () => {
+            vscode.commands.executeCommand('beamEvents.focus');
         }),
 
         vscode.commands.registerCommand('beams.export', async (item: BeamItem) => {

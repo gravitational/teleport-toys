@@ -89,6 +89,16 @@ export function reportTshError(err: unknown, options: ReportOptions): TshErrorKi
         return kind;
     }
 
+    if (kind === 'denied') {
+        if (shouldShow(`${beamId ?? '-'}:denied:${action}`)) {
+            const label = beamId ? `Beam "${beamId}"` : 'This resource';
+            vscode.window.showWarningMessage(
+                `${label}: access denied trying to ${action}. Your login is valid, but you may not have permission for this beam.`
+            );
+        }
+        return kind;
+    }
+
     // tsh words a dropped connection many ways, and not all of them match the disconnect
     // patterns. Before showing an error, check whether the beam is simply gone.
     if (beamId && disconnectNoticed.has(beamId)) {
