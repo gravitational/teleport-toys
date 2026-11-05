@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { classifyTshError, listBeams, tshErrorMessage, TshErrorKind } from './tsh';
+import { closeBeamTerminals } from './terminal';
 
 // A disconnected beam usually fails several operations at once (tree refresh, git poll,
 // an open editor) and the tree view re-queries on a timer, so the same condition would
@@ -48,6 +49,13 @@ export function reportDisconnected(beamId: string | undefined, refresh?: () => v
         vscode.window.showInformationMessage(
             `${label} is no longer available — it may have expired or been stopped.`
         );
+    }
+    // Close any open SSH terminal for this beam ourselves, before the underlying `tsh`
+    // process notices the dropped connection and exits on its own — that would otherwise
+    // trigger VS Code's native "terminal process terminated" alert for what is really just
+    // an expected, ephemeral-beam disconnect.
+    if (beamId) {
+        closeBeamTerminals(beamId);
     }
     refresh?.();
 }

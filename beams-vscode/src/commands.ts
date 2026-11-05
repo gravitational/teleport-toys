@@ -5,7 +5,7 @@ import { PhasesProvider } from './phasesProvider';
 import { PhaseItem } from './phaseItem';
 import { BeamFileExplorer, FileItem } from './fileExplorer';
 import { addBeam, removeBeam, publishBeam, unpublishBeam, execOnBeam, scpFromBeam, checkStatus, listBeams, waitForBeamReady, detectRepoRoot, tshErrorMessage, tshBinary, listClusterProfiles, Phase, listPhases, listFailedPhaseSnapshots, removePhase } from './tsh';
-import { openBeamTerminal, openPhaseAddTerminal, openPhaseAddForkTerminal, openPhaseEditTerminal, openPhaseSnapshotTerminal, openPhaseApplyTerminal } from './terminal';
+import { openBeamTerminal, openPhaseAddTerminal, openPhaseAddForkTerminal, openPhaseEditTerminal, openPhaseSnapshotTerminal, openPhaseApplyTerminal, closeBeamTerminals, untrackBeamTerminal } from './terminal';
 import { reportTshError } from './notify';
 import { setupGithubOnBeam, autoSetupGithub, SECRET_KEY } from './github';
 import { ensureBeamSshConfig } from './ssh';
@@ -174,6 +174,8 @@ export function registerCommands(
     }
 
     context.subscriptions.push(
+        vscode.window.onDidCloseTerminal(terminal => untrackBeamTerminal(terminal)),
+
         vscode.commands.registerCommand('beams.select', async (item: BeamItem) => {
             if (!item?.beam) {
                 return;
@@ -444,6 +446,7 @@ export function registerCommands(
                 await removeBeam(item.beam.id);
                 vscode.window.showInformationMessage(`Beam "${item.beam.id}" deleted.`);
                 provider.refresh();
+                closeBeamTerminals(item.beam.id);
             } catch (err: unknown) {
                 vscode.window.showErrorMessage(`Failed to delete beam: ${err instanceof Error ? err.message : err}`);
             }
