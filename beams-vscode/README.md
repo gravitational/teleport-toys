@@ -1,8 +1,4 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="resources/beams-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="resources/beams-light.svg">
-  <img alt="Beams" src="resources/beams-light.svg" width="200">
-</picture>
+<img alt="Beams" src="resources/beams-icon.png" width="128">
 
 # Beams - VS Code Extension
 
