@@ -104,14 +104,26 @@ export function registerCommands(
     }
 
     async function createPhaseFlow(): Promise<void> {
+        // A name is required (rather than left to the server to generate) so we know what
+        // to pass to the follow-up `phase snapshot` below — without one, `tsh phase add`
+        // leaves the Phase stuck in "building" until something snapshots it.
         const name = await vscode.window.showInputBox({
-            prompt: 'Name for the new Phase (optional)',
+            prompt: 'Name for the new Phase',
             placeHolder: 'e.g. dev-tools',
+            validateInput: value => value.trim() ? undefined : 'A name is required.',
         });
-        if (name === undefined) {
+        if (!name) {
             return;
         }
-        openPhaseAddTerminal(name || undefined);
+        const addTerminal = openPhaseAddTerminal(name);
+        const sub = vscode.window.onDidCloseTerminal(closed => {
+            if (closed !== addTerminal) {
+                return;
+            }
+            sub.dispose();
+            openPhaseSnapshotTerminal(name);
+        });
+        context.subscriptions.push(sub);
     }
 
     context.subscriptions.push(
@@ -451,8 +463,7 @@ export function registerCommands(
             }
             const uri = vscode.Uri.parse(`beam://${entry.beamId}${entry.path}`);
             try {
-                const doc = await vscode.workspace.openTextDocument(uri);
-                await vscode.window.showTextDocument(doc);
+                await vscode.commands.executeCommand('vscode.open', uri);
             } catch (err: unknown) {
                 reportTshError(err, { beamId: entry.beamId, action: 'open file' });
             }

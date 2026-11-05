@@ -1,8 +1,6 @@
-<img alt="Beams" src="resources/beams-icon.png" width="128">
-
 # Beams - VS Code Extension
 
-Powered by [Teleport](https://goteleport.com/). Manage and connect to Teleport Beams directly from VS Code. Create, monitor, and SSH into ephemeral sandbox VMs built for agentic workloads.
+Powered by [Teleport](https://goteleport.com/). Manage and connect to Teleport Beams directly from VS Code. Create, monitor, and SSH into ephemeral agentic runtimes.
 
 This directory contains the source for the extension — there is no separate server component. Everything is driven through the `tsh` CLI (see `src/tsh.ts`), which the extension shells out to for beam lifecycle, file access, git operations, and cluster status.
 
