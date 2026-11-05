@@ -1,6 +1,6 @@
 {
-  "name": "teleport-beams",
-  "displayName": "Teleport Beams",
+  "name": "beams",
+  "displayName": "Beams",
   "description": "Manage and connect to Teleport Beams from VS Code",
   "version": "0.2.1",
   "publisher": "goTeleport",
@@ -15,7 +15,7 @@
     "vscode": "^1.85.0"
   },
   "categories": ["Other"],
-  "activationEvents": ["onView:beamClusters", "onView:beamsList", "onView:beamPhases", "onView:beamFiles", "onView:beamEvents", "onView:beamEventsPanel", "onView:beamSessionProfiles", "onCommand:beams.connect", "onFileSystem:beam-git"],
+  "activationEvents": ["onView:beamClusters", "onView:beamsList", "onView:beamPhases", "onView:beamFiles", "onView:beamEvents", "onView:beamEventsPanel", "onCommand:beams.connect", "onFileSystem:beam-git"],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -37,16 +37,12 @@
     "views": {
       "teleport-beams": [
         {
-          "id": "beamClusters",
-          "name": "Clusters"
-        },
-        {
           "id": "beamsList",
-          "name": "Beams"
+          "name": "Beams Runtimes"
         },
         {
           "id": "beamPhases",
-          "name": "Phases"
+          "name": "Phase Snapshots"
         },
         {
           "id": "beamFiles",
@@ -57,8 +53,8 @@
           "name": "Agent Events"
         },
         {
-          "id": "beamSessionProfiles",
-          "name": "Session Profiles"
+          "id": "beamClusters",
+          "name": "Clusters"
         }
       ],
       "teleport-beams-panel": [
@@ -94,12 +90,6 @@
       { "command": "beams.showDiff", "title": "Show Diff", "icon": "$(diff)", "category": "Beams" },
       { "command": "beams.gitRefreshScm", "title": "Refresh Git Status", "icon": "$(refresh)", "category": "Beams" },
       { "command": "beams.selectScm", "title": "Initialize SCM", "category": "Beams" },
-      { "command": "beams.saveSessionProfile", "title": "Save Session Profile", "icon": "$(save)", "category": "Beams" },
-      { "command": "beams.updateSessionProfile", "title": "Update Session Profile", "icon": "$(sync)", "category": "Beams" },
-      { "command": "beams.resumeSessionProfile", "title": "Resume Session Profile", "icon": "$(play-circle)", "category": "Beams" },
-      { "command": "beams.viewSessionProfile", "title": "View Session Profile", "category": "Beams" },
-      { "command": "beams.deleteSessionProfile", "title": "Delete Session Profile", "icon": "$(trash)", "category": "Beams" },
-      { "command": "beams.refreshSessionProfiles", "title": "Refresh Session Profiles", "icon": "$(refresh)", "category": "Beams" },
       { "command": "beams.container.create", "title": "Replicate to Local Debug Container", "icon": "$(vm)", "category": "Beams" },
       { "command": "beams.container.open", "title": "Open Local Debug Container", "icon": "$(debug-console)", "category": "Beams" },
       { "command": "beams.container.syncNow", "title": "Sync Local Debug Container Now", "icon": "$(sync)", "category": "Beams" },
@@ -132,9 +122,7 @@
         { "command": "beams.refreshFiles", "when": "view == beamFiles", "group": "navigation" },
         { "command": "beams.uploadFiles", "when": "view == beamFiles", "group": "navigation" },
         { "command": "beams.events.expand", "when": "view == beamEvents", "group": "navigation" },
-        { "command": "beams.events.collapse", "when": "view == beamEventsPanel", "group": "navigation" },
-        { "command": "beams.resumeSessionProfile", "when": "view == beamSessionProfiles", "group": "navigation" },
-        { "command": "beams.refreshSessionProfiles", "when": "view == beamSessionProfiles", "group": "navigation" }
+        { "command": "beams.events.collapse", "when": "view == beamEventsPanel", "group": "navigation" }
       ],
       "view/item/context": [
         { "command": "beams.connect", "when": "view == beamsList && viewItem =~ /^beam(Published)?(-hasLocalContainer)?$/", "group": "inline" },
@@ -146,7 +134,6 @@
         { "command": "beams.copyUrl", "when": "view == beamsList && viewItem == beamPublished", "group": "2_actions" },
         { "command": "beams.export", "when": "view == beamsList && viewItem =~ /^beam(Published)?(-hasLocalContainer)?$/", "group": "2_actions" },
         { "command": "beams.setupGithub", "when": "view == beamsList && viewItem =~ /^beam(Published)?(-hasLocalContainer)?$/", "group": "2_actions" },
-        { "command": "beams.saveSessionProfile", "when": "view == beamsList && viewItem =~ /^beam(Published)?(-hasLocalContainer)?$/", "group": "2_actions" },
         { "command": "beams.container.create", "when": "view == beamsList && viewItem =~ /^beam(Published)?$/", "group": "2_actions" },
         { "command": "beams.container.open", "when": "view == beamsList && viewItem =~ /hasLocalContainer/", "group": "2_actions" },
         { "command": "beams.container.syncNow", "when": "view == beamsList && viewItem =~ /hasLocalContainer/", "group": "2_actions" },
@@ -157,9 +144,6 @@
         { "command": "beams.showDiff", "when": "view == beamFiles && viewItem == beamFileChanged", "group": "inline" },
         { "command": "beams.uploadFiles", "when": "view == beamFiles && viewItem == beamFolder", "group": "1_file" },
         { "command": "beams.downloadFile", "when": "view == beamFiles && viewItem =~ /^beam(File|FileChanged|Folder)$/", "group": "1_file" },
-        { "command": "beams.resumeSessionProfile", "when": "view == beamSessionProfiles && viewItem == sessionProfile", "group": "inline" },
-        { "command": "beams.updateSessionProfile", "when": "view == beamSessionProfiles && viewItem == sessionProfile", "group": "inline" },
-        { "command": "beams.deleteSessionProfile", "when": "view == beamSessionProfiles && viewItem == sessionProfile", "group": "3_danger" },
         { "command": "beams.copyResourceIdentifier", "when": "view == beamClusters && viewItem =~ /^resource-/", "group": "inline" },
         { "command": "beams.phase.edit", "when": "view == beamPhases && viewItem =~ /^phase(Failed)?$/", "group": "inline" },
         { "command": "beams.phase.snapshot", "when": "view == beamPhases && viewItem =~ /^phase(Failed)?$/", "group": "1_actions" },
@@ -245,7 +229,7 @@
     "watch": "tsc -watch -p ./",
     "prepackage": "npm run compile",
     "package": "vsce package --no-dependencies",
-    "install-local": "code --install-extension teleport-beams-$npm_package_version.vsix"
+    "install-local": "code --install-extension beams-$npm_package_version.vsix"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

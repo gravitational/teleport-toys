@@ -1,6 +1,12 @@
-# Teleport Beams - VS Code Extension
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="resources/beams-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="resources/beams-light.svg">
+  <img alt="Beams" src="resources/beams-light.svg" width="200">
+</picture>
 
-Manage and connect to Teleport Beams directly from VS Code. Create, monitor, and SSH into ephemeral sandbox VMs built for agentic workloads.
+# Beams - VS Code Extension
+
+Powered by [Teleport](https://goteleport.com/). Manage and connect to Teleport Beams directly from VS Code. Create, monitor, and SSH into ephemeral sandbox VMs built for agentic workloads.
 
 This directory contains the source for the extension — there is no separate server component. Everything is driven through the `tsh` CLI (see `src/tsh.ts`), which the extension shells out to for beam lifecycle, file access, git operations, and cluster status.
 
@@ -8,9 +14,10 @@ This project lives in [`gravitational/teleport-toys`](https://github.com/gravita
 
 ## Features
 
+- **Beams Runtimes sidebar** — list, create, rename, and delete beams; each row expands into a detail dropdown (ID, URL, region, phase, roles, expires) instead of relying on a tooltip
+- **Phase Snapshots panel** — build and manage reusable Phase images (`tsh phase ls/add/edit/snapshot/rm/apply/ls-failed`): edit a Phase's last successful snapshot, save a new snapshot, apply a Phase configuration YAML, inspect failed build snapshots, or base a new beam directly on an existing Phase
 - **Clusters panel** — shows all logged-in Teleport profiles (active + inactive), with roles, logins, and session expiry
-- **Beams sidebar** — list, create, rename, and delete beams
-- **File explorer** — browse and edit beam files without SSH, with live change indicators as files are modified on the remote beam
+- **File explorer** — browse and edit beam files without SSH, with live change indicators as files are modified on the remote beam; upload files via the toolbar button, per-folder, or drag-and-drop, and download files/folders back to your machine
 - **Agent Events** — chronological stream of agent session events, auto-detected from the most recently modified JSONL transcript under any `~/.<tool>` dotdir (Claude Code's schema is parsed natively; other agents get a best-effort generic view)
 - **Remote-SSH** — one-click VS Code Remote-SSH connection to any beam, with automatic `~/.ssh/config` management
 - **Terminal** — open a `tsh` SSH session in the integrated terminal
@@ -20,6 +27,7 @@ This project lives in [`gravitational/teleport-toys`](https://github.com/gravita
 - **Publish / Unpublish** — expose a beam's port 8080 app publicly and copy its URL
 - **Run on Beam** — run a command on a beam, publish its port, and open it in the browser
 - **Export** — download beam files as a `tar.gz` archive
+- **Login** — pick from any cluster you've already logged into, or enter a new proxy address, from a single Login command (surfaced in both the Clusters and Beams panels)
 - **GitHub credentials** — PAT, OAuth (`gh` browser flow), or Teleport Git Proxy authentication for git operations on a beam, with saved preferences for auto-setup on new beams
 
 ## Prerequisites
@@ -30,47 +38,26 @@ This project lives in [`gravitational/teleport-toys`](https://github.com/gravita
 - Docker (only required if you use Local Debug Containers)
 - VS Code 1.85+
 
-## Install from VSIX
+## Install
 
-```bash
-# Clone and build
-git clone https://github.com/gravitational/teleport-toys.git
-cd teleport-toys/beams-vscode
-npm install
-npm run package
+Install the **Beams** extension from the VS Code Marketplace, or in VS Code: Extensions panel > search "Beams" > Install.
 
-# Install the extension (filename matches the version in package.json)
-code --install-extension teleport-beams-<version>.vsix
-```
-
-Or in VS Code: Extensions panel > `...` menu > "Install from VSIX..." and select the `.vsix` file.
-
-## Development
-
-```bash
-npm install
-npm run dev            # watch mode — recompiles on save
-npm run compile        # one-shot TypeScript compile
-npm test               # compile + run tests (node:test)
-npm run package        # compile + vsce package → teleport-beams-<version>.vsix
-npm run install-local  # install the built .vsix into VS Code
-```
-
-There is no linter configured; `tsc` is the primary correctness check. Tests live in `test/` (currently covering SSH config repair logic).
-
-Press `F5` in VS Code to launch the Extension Development Host (reads `.vscode/launch.json`).
+To install from a `.vsix` file instead (e.g. a pre-release build someone sent you): Extensions panel > `...` menu > "Install from VSIX..." and select the file, or `code --install-extension <file>.vsix`.
 
 ## Usage
 
-1. Open the **Beams** panel in the activity bar (left sidebar). It has four views: **Clusters**, **Beams**, **Files**, and **Agent Events**.
-2. Click **Login** (key icon) if not already authenticated.
-3. Click **Create Beam** (+) to spin up a new VM, optionally applying your saved GitHub credentials and enabling a local debug container.
+1. Open the **Beams** panel in the activity bar (left sidebar). It has views for **Beams Runtimes**, **Phase Snapshots**, **Files**, **Agent Events**, and **Clusters**.
+2. Click **Login** (key icon) if not already authenticated — pick a cluster you've logged into before, or enter a new proxy address.
+3. Click **Create Beam** (+) to spin up a new VM, optionally basing it on a saved Phase, applying your saved GitHub credentials, and enabling a local debug container.
 4. Click a beam to select it — the Files and Agent Events panels populate, and SCM/git integration activates if the beam has a git repo.
-5. Use the inline buttons on each beam:
+5. Expand a beam row to see its details (ID, URL, region, phase, roles, expires).
+6. Use the inline buttons on each beam:
    - `$(remote)` — open a Remote-SSH session in a new VS Code window
    - `$(globe)` — open the beam's published app in the browser
    - `$(terminal)` — open a `tsh` SSH terminal
-6. Right-click a beam for more actions: open files, publish/unpublish, export, setup GitHub, rename, delete, and local debug container controls (when enabled for that beam).
+7. Right-click a beam for more actions: open files, publish/unpublish, export, setup GitHub, rename, delete, and local debug container controls (when enabled for that beam).
+8. In the Files view, upload files via the toolbar button, by right-clicking a folder, or by dragging files from your OS onto a folder; right-click a file or folder to download it.
+9. Use the Phase Snapshots view to build reusable Phase images and manage their snapshots.
 
 ## Commands
 
@@ -85,6 +72,8 @@ Press `F5` in VS Code to launch the Extension Development Host (reads `.vscode/l
 | Beams: SSH into Beam | Open terminal session |
 | Beams: Open Beam Files | Browse files remotely |
 | Beams: Refresh Files | Refresh the file explorer |
+| Beams: Upload Files | Upload local files to a beam folder |
+| Beams: Download | Download a remote file or folder |
 | Beams: Open in Browser | Run a command on a beam, publish its port, and open it |
 | Beams: Publish / Unpublish Beam | Make a beam accessible via URL |
 | Beams: Copy URL | Copy a published beam's URL |
@@ -93,6 +82,10 @@ Press `F5` in VS Code to launch the Extension Development Host (reads `.vscode/l
 | Beams: Show Diff | Show a file's diff against `HEAD` |
 | Beams: Stage / Unstage File | Git staging from the SCM panel |
 | Beams: Refresh Git Status | Force a git status poll |
+| Beams: Create Phase | Build a new reusable Phase image |
+| Beams: Manage Phase | Edit, snapshot, or delete a Phase |
+| Beams: Apply Phase Configuration (YAML) | Create/update a Phase from a YAML config file |
+| Beams: View Failed Phase Snapshots | Inspect Phase builds that failed |
 | Beams: Local Debug Container — Open | Open a local Docker mirror of a beam's workspace |
 | Beams: Local Debug Container — Sync Now | Force an immediate sync pass |
 | Beams: Local Debug Container — Rebuild Image | Rebuild the container image |
@@ -117,9 +110,3 @@ All settings live under the `beams.*` namespace (see `package.json` → `contrib
 | `beams.container.enabled` | `true` | Global kill-switch for local debug container sync |
 | `beams.container.syncMinInterval` | `3` | Minimum seconds between automatic sync passes |
 | `beams.container.baseImage` | `debian:bookworm-slim` | Base Docker image for generated local debug containers |
-
-## Packaging
-
-```bash
-npm run package    # builds and produces teleport-beams-<version>.vsix
-```
