@@ -45,6 +45,10 @@ export interface Beam {
     owner: string;
     expires: string;
     url: string;
+    region?: string;
+    requested_region?: string;
+    phase?: string;
+    roles?: string[];
 }
 
 export interface TshStatus {
@@ -97,7 +101,7 @@ export function stripAnsi(text: string): string {
     return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 }
 
-export type TshErrorKind = 'disconnected' | 'auth' | 'other';
+export type TshErrorKind = 'disconnected' | 'auth' | 'denied' | 'other';
 
 // A beam that has expired, been deleted, or stopped answering is a normal, expected
 // end-of-life condition rather than a failure the user needs to act on. `tsh` reports
@@ -124,6 +128,13 @@ const AUTH_PATTERNS = [
     'not logged in',
     'relogin',
     'certificate has expired',
+];
+
+// "access denied" is an RBAC authorization failure for a specific resource — it fires even
+// with a perfectly valid, unexpired login (e.g. a beam's own delegated identity isn't
+// authorized to exec into itself or a sibling beam). It must stay out of AUTH_PATTERNS, or
+// a routine permission error gets misreported as "your session has expired."
+const DENIED_PATTERNS = [
     'access denied',
 ];
 
@@ -159,6 +170,9 @@ export function classifyTshError(err: unknown): TshErrorKind {
     if (AUTH_PATTERNS.some(p => msg.includes(p))) {
         return 'auth';
     }
+    if (DENIED_PATTERNS.some(p => msg.includes(p))) {
+        return 'denied';
+    }
     const code = (err as { code?: unknown } | undefined)?.code;
     const killed = (err as { killed?: unknown } | undefined)?.killed;
     if (code === 'ETIMEDOUT' || killed === true) {
@@ -176,7 +190,10 @@ async function runTsh(args: string[], options?: { timeout?: number }): Promise<s
 }
 
 export async function listBeams(): Promise<Beam[]> {
-    const output = await runTsh(['beams', 'ls', '-f', 'json']);
+    // Without --all, tsh scopes the list to beams owned by the *current* identity — which,
+    // run from inside a beam, is that beam's own delegated bot identity, not the human
+    // user. That hides every other beam the user owns and shows only this one's beam instead.
+    const output = await runTsh(['beams', 'ls', '--all', '-f', 'json']);
     const parsed = JSON.parse(output);
     if (!Array.isArray(parsed)) {
         return [];
@@ -184,14 +201,48 @@ export async function listBeams(): Promise<Beam[]> {
     return parsed;
 }
 
-export async function addBeam(): Promise<Beam> {
+export async function addBeam(options?: { phase?: string }): Promise<Beam> {
+    const args = ['beams', 'add', '-f', 'json'];
+    if (options?.phase) {
+        args.push(`--phase=${options.phase}`);
+    }
     // Provisioning can fall back to another region, so allow more than the default 30s.
-    const output = await runTsh(['beams', 'add', '-f', 'json'], { timeout: 120000 });
+    const output = await runTsh(args, { timeout: 120000 });
     return JSON.parse(output);
 }
 
 export async function removeBeam(id: string): Promise<void> {
     await runTsh(['beams', 'rm', id]);
+}
+
+export interface Phase {
+    name: string;
+    owner: string;
+    strategy: string;
+    parent: string;
+    state: string;
+    region: string;
+    roles: string[];
+    last_error?: string;
+}
+
+export async function listPhases(): Promise<Phase[]> {
+    const output = await runTsh(['phase', 'ls', '-f', 'json']);
+    const parsed = JSON.parse(output);
+    if (!Array.isArray(parsed)) {
+        return [];
+    }
+    return parsed;
+}
+
+export async function listFailedPhaseSnapshots(): Promise<unknown[]> {
+    const output = await runTsh(['phase', 'ls-failed', '-f', 'json']);
+    const parsed = JSON.parse(output);
+    return Array.isArray(parsed) ? parsed : [];
+}
+
+export async function removePhase(name: string): Promise<void> {
+    await runTsh(['phase', 'rm', name]);
 }
 
 export async function publishBeam(id: string, tcp = false): Promise<string> {

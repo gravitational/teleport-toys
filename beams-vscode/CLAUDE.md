@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 npm run compile        # one-shot TypeScript compile → out/
 npm run dev            # watch mode, recompiles on save
-npm run package        # compile + vsce package → teleport-beams-<version>.vsix
+npm run package        # compile + vsce package → beams-<version>.vsix
 npm run install-local  # install the built .vsix into VS Code
 npm test                # compile + run test/*.test.js (node:test)
 ```
@@ -50,8 +50,6 @@ It notifies registered `PollConsumer` implementors. Polling pauses when VS Code 
 | `scm.ts` | `BeamGitScmProvider` — VS Code SCM panel, consumes porcelain output from BeamPoller |
 | `scmCommands.ts` | Stage/unstage/show-diff/refresh git commands over `tsh beams exec`. Commit, discard, push, and create-pull-request were deliberately removed — do not reintroduce history-writing or remote-publishing operations here |
 | `events.ts` | Streams chronological events parsed from the most recently modified JSONL transcript under any `~/.<tool>` dotdir (e.g. `.claude`, `.codex`) — parses Claude Code's schema specifically, with a best-effort generic fallback for other agents' JSONL shapes |
-| `agents.ts` | Registry of coding-agent CLI adapters (`claude`, `codex`) — binary detection on a beam, the headless/non-interactive command to draft a summary, and the global memory file each agent auto-loads (`.claude/CLAUDE.md`, `AGENTS.md`). Used by `sessionProfiles.ts` so summary generation isn't tied to one agent |
-| `sessionProfiles.ts` | Save/resume workflow for resumable task memory — captures a beam's git ref plus an agent-drafted summary, writes it to `.beams/session-memory/` on the beam, and appends it into whichever agent's global memory file `agents.ts` detected |
 | `ssh.ts` | Manages `~/.ssh/config` between `# BEGIN Teleport Beams` / `# END Teleport Beams` markers for Remote-SSH |
 | `commands.ts` | Registers all `beams.*` VS Code commands |
 | `fileDecorations.ts` | Git status badge decorations on files in the file explorer |

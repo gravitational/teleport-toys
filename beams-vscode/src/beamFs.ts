@@ -152,8 +152,10 @@ export class BeamFileSystemProvider implements vscode.FileSystemProvider {
         }
 
         try {
-            const output = await execOnBeam(beamId, ['cat', remotePath]);
-            const content = Buffer.from(output);
+            // execFile decodes stdout as UTF-8, which would mangle arbitrary binary bytes —
+            // base64 on the remote side and decode locally, same as the stat() prefetch does.
+            const output = await execOnBeam(beamId, [`base64 ${shellQuote(remotePath)}`]);
+            const content = Buffer.from(output.trim(), 'base64');
             this.contentCache.set(key, { content, expires: Date.now() + CACHE_TTL_MS });
             return content;
         } catch {

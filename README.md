@@ -3,4 +3,4 @@ Small projects and experiments from the Teleport team. (not officially supported
 
 ## Projects
 
-- [`beams-vscode`](beams-vscode/) — VS Code extension to manage and connect to Teleport Beams: create, monitor, and SSH into ephemeral sandbox VMs built for agentic workloads.
+- [`beams-vscode`](beams-vscode/) — VS Code extension to manage and connect to Teleport Beams: create, monitor, and SSH into ephemeral agentic runtimes.

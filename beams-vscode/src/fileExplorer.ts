@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { Beam, execOnBeam } from './tsh';
+import * as path from 'path';
+import { Beam, execOnBeam, classifyTshError, tshErrorMessage } from './tsh';
 import { reportTshError } from './notify';
 import { PollConsumer } from './polling';
 
@@ -10,7 +11,7 @@ interface FileEntry {
     beamId: string;
 }
 
-class FileItem extends vscode.TreeItem {
+export class FileItem extends vscode.TreeItem {
     constructor(public readonly entry: FileEntry, changed: boolean) {
         super(
             entry.name,
@@ -39,9 +40,26 @@ class FileItem extends vscode.TreeItem {
     }
 }
 
-export class BeamFileExplorer implements vscode.TreeDataProvider<FileItem>, PollConsumer {
-    private _onDidChangeTreeData = new vscode.EventEmitter<FileItem | undefined | null>();
+// A non-navigable row for states that aren't worth an intrusive toast — e.g. a beam that's
+// visible (listed) but outside the current identity's access scope. Mirrors how
+// ClustersProvider reports resource-load failures inline instead of popping a notification.
+class FileInfoItem extends vscode.TreeItem {
+    constructor(label: string, icon: string) {
+        super(label, vscode.TreeItemCollapsibleState.None);
+        this.iconPath = new vscode.ThemeIcon(icon);
+    }
+}
+
+type FileTreeItem = FileItem | FileInfoItem;
+
+export class BeamFileExplorer implements vscode.TreeDataProvider<FileTreeItem>, vscode.TreeDragAndDropController<FileTreeItem>, PollConsumer {
+    private _onDidChangeTreeData = new vscode.EventEmitter<FileTreeItem | undefined | null>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+    // Dragging in local files from the OS (Finder/Explorer) arrives as a uri-list; we don't
+    // support dragging FileItems back out (no dragMimeTypes), only dropping onto the tree.
+    readonly dropMimeTypes = ['text/uri-list'];
+    readonly dragMimeTypes: string[] = [];
 
     private currentBeam: Beam | undefined;
     private changedPaths = new Set<string>();
@@ -81,12 +99,15 @@ export class BeamFileExplorer implements vscode.TreeDataProvider<FileItem>, Poll
         this._onDidChangeTreeData.fire(undefined);
     }
 
-    getTreeItem(element: FileItem): vscode.TreeItem {
+    getTreeItem(element: FileTreeItem): vscode.TreeItem {
         return element;
     }
 
-    async getChildren(element?: FileItem): Promise<FileItem[]> {
+    async getChildren(element?: FileTreeItem): Promise<FileTreeItem[]> {
         if (!this.currentBeam) {
+            return [];
+        }
+        if (element instanceof FileInfoItem) {
             return [];
         }
 
@@ -132,8 +153,77 @@ export class BeamFileExplorer implements vscode.TreeDataProvider<FileItem>, Poll
 
             return entries;
         } catch (err) {
+            // A beam that's listed but outside this identity's access scope (e.g. one owned
+            // by the same human but delegated to a different beam's bot identity) fails every
+            // file listing attempt the same way. Show it once, inline, instead of a toast per
+            // directory the tree tries to expand.
+            if (classifyTshError(err) === 'denied') {
+                return [new FileInfoItem(`Access denied: ${tshErrorMessage(err)}`, 'lock')];
+            }
             reportTshError(err, { beamId, action: 'list files' });
             return [];
+        }
+    }
+
+    async handleDrop(target: FileTreeItem | undefined, dataTransfer: vscode.DataTransfer): Promise<void> {
+        if (target instanceof FileInfoItem) {
+            return;
+        }
+        const transferItem = dataTransfer.get('text/uri-list');
+        if (!transferItem) {
+            return;
+        }
+        const raw = await transferItem.asString();
+        const uris = raw.split('\n').map(s => s.trim()).filter(Boolean).map(s => vscode.Uri.parse(s));
+        if (uris.length === 0) {
+            return;
+        }
+
+        const targetDir = !target
+            ? '/home/beams'
+            : target.entry.isDirectory
+                ? target.entry.path
+                : path.posix.dirname(target.entry.path);
+        await this.uploadLocalFiles(targetDir, uris);
+    }
+
+    // Shared by the drag-and-drop handler above and the `beams.uploadFiles` command — both
+    // just need to know which local files go into which remote directory. `beam://` already
+    // implements the full FileSystemProvider surface (readDirectory/readFile/writeFile/
+    // createDirectory), so a generic `vscode.workspace.fs.copy` handles recursive directory
+    // uploads too, without needing a separate scp-based code path.
+    async uploadLocalFiles(targetDir: string, localUris: vscode.Uri[]): Promise<void> {
+        if (!this.currentBeam) {
+            vscode.window.showWarningMessage('Select a beam first.');
+            return;
+        }
+        const beamId = this.currentBeam.id;
+        const dir = targetDir.endsWith('/') ? targetDir : `${targetDir}/`;
+
+        const failures: string[] = [];
+        await vscode.window.withProgress(
+            { location: vscode.ProgressLocation.Notification, title: 'Uploading files...' },
+            async progress => {
+                for (const uri of localUris) {
+                    const name = path.basename(uri.fsPath);
+                    progress.report({ message: name });
+                    const destUri = vscode.Uri.parse(`beam://${beamId}${dir}${name}`);
+                    try {
+                        await vscode.workspace.fs.copy(uri, destUri, { overwrite: true });
+                    } catch (err: unknown) {
+                        failures.push(`${name}: ${err instanceof Error ? err.message : err}`);
+                    }
+                }
+            }
+        );
+
+        this.refresh();
+        if (failures.length > 0) {
+            vscode.window.showErrorMessage(`Some files failed to upload:\n${failures.join('\n')}`);
+        } else {
+            vscode.window.showInformationMessage(
+                `Uploaded ${localUris.length} item${localUris.length === 1 ? '' : 's'} to ${targetDir}.`
+            );
         }
     }
 }

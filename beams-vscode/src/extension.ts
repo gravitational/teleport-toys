@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
 import { BeamsProvider } from './beamsProvider';
+import { PhasesProvider } from './phasesProvider';
 import { BeamFileExplorer } from './fileExplorer';
 import { BeamFileSystemProvider } from './beamFs';
 import { AgentEventsProvider } from './events';
 import { ClustersProvider, ResourceLeafItem } from './clusters';
-import { SessionProfilesProvider } from './sessionProfilesProvider';
 import { registerCommands } from './commands';
 import { BeamPoller } from './polling';
 import { BeamGitOriginalProvider } from './gitOriginal';
@@ -17,10 +17,10 @@ import { setBeamLabelStore } from './beamItem';
 export function activate(context: vscode.ExtensionContext): void {
     setBeamLabelStore(context.globalState);
     const provider = new BeamsProvider();
+    const phasesProvider = new PhasesProvider();
     const fileExplorer = new BeamFileExplorer();
     const eventsProvider = new AgentEventsProvider();
     const clustersProvider = new ClustersProvider();
-    const sessionProfilesProvider = new SessionProfilesProvider();
 
     const poller = new BeamPoller();
     const fsProvider = new BeamFileSystemProvider();
@@ -64,12 +64,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.window.createTreeView('beamsList', {
         treeDataProvider: provider,
+        showCollapseAll: true,
+    });
+
+    vscode.window.createTreeView('beamPhases', {
+        treeDataProvider: phasesProvider,
         showCollapseAll: false,
     });
 
     vscode.window.createTreeView('beamFiles', {
         treeDataProvider: fileExplorer,
         showCollapseAll: true,
+        dragAndDropController: fileExplorer,
     });
 
     vscode.window.createTreeView('beamEvents', {
@@ -77,8 +83,11 @@ export function activate(context: vscode.ExtensionContext): void {
         showCollapseAll: false,
     });
 
-    vscode.window.createTreeView('beamSessionProfiles', {
-        treeDataProvider: sessionProfilesProvider,
+    // Same provider instance as the sidebar view, backing a second copy of the tree in the
+    // Panel area (where Terminal/Output live) so "Expand to Panel" can hand off to a spot
+    // that supports VS Code's native full-width panel maximizing.
+    vscode.window.createTreeView('beamEventsPanel', {
+        treeDataProvider: eventsProvider,
         showCollapseAll: false,
     });
 
@@ -107,7 +116,7 @@ export function activate(context: vscode.ExtensionContext): void {
         })
     );
 
-    registerCommands(context, provider, fileExplorer, eventsProvider, sessionProfilesProvider, poller, () => scmProvider, containerSyncEngine);
+    registerCommands(context, provider, phasesProvider, fileExplorer, eventsProvider, poller, () => scmProvider, containerSyncEngine);
     registerScmCommands(context, () => poller);
 
     // Hook beam selection to start SCM integration
@@ -125,6 +134,7 @@ export function activate(context: vscode.ExtensionContext): void {
     );
 
     context.subscriptions.push({ dispose: () => provider.dispose() });
+    context.subscriptions.push({ dispose: () => phasesProvider.dispose() });
     context.subscriptions.push({ dispose: () => eventsProvider.stop() });
     context.subscriptions.push({ dispose: () => clustersProvider.dispose() });
     context.subscriptions.push({ dispose: () => poller.dispose() });

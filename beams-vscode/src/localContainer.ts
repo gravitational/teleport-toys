@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { suppressExitAlert } from './terminal';
 
 const exec = promisify(execFile);
 
@@ -259,8 +260,7 @@ export async function removeContainer(record: LocalContainerRecord): Promise<voi
 export function openContainerTerminal(record: LocalContainerRecord): vscode.Terminal {
     const terminal = vscode.window.createTerminal({
         name: `Local: ${record.beamId}`,
-        shellPath: 'docker',
-        shellArgs: ['exec', '-it', record.containerName, 'bash'],
+        ...suppressExitAlert('docker', ['exec', '-it', record.containerName, 'bash']),
         iconPath: new vscode.ThemeIcon('debug-console'),
     });
     terminal.show();
