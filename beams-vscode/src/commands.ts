@@ -5,7 +5,7 @@ import { PhasesProvider } from './phasesProvider';
 import { PhaseItem } from './phaseItem';
 import { BeamFileExplorer, FileItem } from './fileExplorer';
 import { addBeam, removeBeam, publishBeam, unpublishBeam, execOnBeam, scpFromBeam, checkStatus, listBeams, waitForBeamReady, detectRepoRoot, tshErrorMessage, tshBinary, listClusterProfiles, Phase, listPhases, listFailedPhaseSnapshots, removePhase } from './tsh';
-import { openBeamTerminal, openPhaseAddTerminal, openPhaseEditTerminal, openPhaseSnapshotTerminal, openPhaseApplyTerminal } from './terminal';
+import { openBeamTerminal, openPhaseAddTerminal, openPhaseAddForkTerminal, openPhaseEditTerminal, openPhaseSnapshotTerminal, openPhaseApplyTerminal } from './terminal';
 import { reportTshError } from './notify';
 import { setupGithubOnBeam, autoSetupGithub, SECRET_KEY } from './github';
 import { ensureBeamSshConfig } from './ssh';
@@ -57,12 +57,43 @@ export function registerCommands(
         }
     }
 
+    // A Phase's `parent` field names the image it was built from, as "<name>:<version>" or
+    // "<name>@sha256:<digest>" — matching the "Phase name or parent@sha256:digest" format
+    // `--fork-from` documents. Used to find a Phase's children.
+    function isChildOfPhase(parent: string, name: string): boolean {
+        return parent === name || parent.startsWith(`${name}:`) || parent.startsWith(`${name}@`);
+    }
+
+    async function forkPhaseFlow(parentName: string): Promise<void> {
+        const name = await vscode.window.showInputBox({
+            prompt: `Name for the new Phase forked from "${parentName}"`,
+            placeHolder: 'e.g. dev-tools-v2',
+            validateInput: value => value.trim() ? undefined : 'A name is required.',
+        });
+        if (!name) {
+            return;
+        }
+        const addTerminal = openPhaseAddForkTerminal(name, parentName);
+        const sub = vscode.window.onDidCloseTerminal(closed => {
+            if (closed !== addTerminal) {
+                return;
+            }
+            sub.dispose();
+            openPhaseSnapshotTerminal(name);
+        });
+        context.subscriptions.push(sub);
+    }
+
     // `tsh phase edit` opens a build console against the Phase's last successful snapshot.
     // A Phase that's still building or whose last build failed has no such snapshot, and
     // the CLI fails with "has no successful snapshot" — but that failure only ever shows up
     // in the integrated terminal's transient exit banner, which is easy to miss. Catch the
     // known-bad states up front and explain why, instead of letting the terminal fail silently.
-    function editPhase(phase: Phase): void {
+    //
+    // A Phase that already has a snapshot-strategy child (one forked from its build Beam's
+    // filesystem with `--fork`/`--fork-from`) can't be edited in place — re-snapshotting it
+    // would invalidate what the child captured. Fork a new Phase from it instead.
+    async function editPhase(phase: Phase): Promise<void> {
         if (phase.state === 'building') {
             vscode.window.showWarningMessage(
                 `Phase "${phase.name}" is still building, so it has no successful snapshot to edit yet. Try again once the build finishes.`
@@ -75,6 +106,22 @@ export function registerCommands(
             );
             return;
         }
+
+        let allPhases: Phase[] = [];
+        try {
+            allPhases = await listPhases();
+        } catch (err: unknown) {
+            console.warn(`Beams: failed to list phases: ${tshErrorMessage(err)}`);
+        }
+        const hasSnapshotChild = allPhases.some(p => p.strategy === 'snapshot' && isChildOfPhase(p.parent, phase.name));
+        if (hasSnapshotChild) {
+            vscode.window.showInformationMessage(
+                `Phase "${phase.name}" has a snapshot Phase forked from it, so it can't be edited in place. Forking a new Phase from it instead.`
+            );
+            await forkPhaseFlow(phase.name);
+            return;
+        }
+
         openPhaseEditTerminal(phase.name);
     }
 
@@ -92,7 +139,7 @@ export function registerCommands(
         }
         switch (choice.action) {
             case 'edit':
-                editPhase(phase);
+                await editPhase(phase);
                 break;
             case 'snapshot':
                 openPhaseSnapshotTerminal(phase.name);
@@ -228,14 +275,22 @@ export function registerCommands(
 
             const choice = await vscode.window.showQuickPick(
                 [
-                    { label: '$(vm) Beam', description: 'Start a new ephemeral beam', createKind: 'beam' as const, phase: undefined as string | undefined },
-                    { label: '$(package) Phase', description: 'Build a reusable Phase image', createKind: 'phase' as const, phase: undefined as string | undefined },
-                    ...phases.map(p => ({
-                        label: `$(layers) Beam from Phase: ${p.name}`,
-                        description: `${p.state} · ${p.region}`,
-                        createKind: 'beam' as const,
-                        phase: p.name as string | undefined,
-                    })),
+                    { label: '$(vm) Beam', description: 'Beam without state, with no ability to save snapshots', createKind: 'beam' as const, phase: undefined as string | undefined },
+                    { label: '$(package) Phase Beams with state', description: 'Create a new Phase and its build beam', createKind: 'phase' as const, phase: undefined as string | undefined },
+                    ...phases.flatMap(p => [
+                        {
+                            label: `$(edit) Beam from Phase: ${p.name} (with state)`,
+                            description: `${p.state} · ${p.region} · changes can be snapshotted back to the Phase`,
+                            createKind: 'editPhase' as const,
+                            phase: p.name as string | undefined,
+                        },
+                        {
+                            label: `$(layers) Beam from Phase: ${p.name} (without state)`,
+                            description: `${p.state} · ${p.region} · changes won't be saved`,
+                            createKind: 'beam' as const,
+                            phase: p.name as string | undefined,
+                        },
+                    ]),
                 ],
                 { placeHolder: 'What would you like to create?' }
             );
@@ -245,6 +300,14 @@ export function registerCommands(
 
             if (choice.createKind === 'phase') {
                 await createPhaseFlow();
+                return;
+            }
+
+            if (choice.createKind === 'editPhase') {
+                const phase = phases.find(p => p.name === choice.phase);
+                if (phase) {
+                    await editPhase(phase);
+                }
                 return;
             }
 
@@ -313,11 +376,11 @@ export function registerCommands(
             await managePhase(item.phase);
         }),
 
-        vscode.commands.registerCommand('beams.phase.edit', (item: PhaseItem) => {
+        vscode.commands.registerCommand('beams.phase.edit', async (item: PhaseItem) => {
             if (!item?.phase) {
                 return;
             }
-            editPhase(item.phase);
+            await editPhase(item.phase);
         }),
 
         vscode.commands.registerCommand('beams.phase.snapshot', (item: PhaseItem) => {

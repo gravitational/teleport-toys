@@ -24,6 +24,17 @@ export function openPhaseAddTerminal(name?: string): vscode.Terminal {
     return terminal;
 }
 
+export function openPhaseAddForkTerminal(name: string, forkFrom: string): vscode.Terminal {
+    const terminal = vscode.window.createTerminal({
+        name: `Phase: ${name}`,
+        shellPath: tshBinary(),
+        shellArgs: ['phase', 'add', name, `--fork-from=${forkFrom}`],
+        iconPath: new vscode.ThemeIcon('git-branch'),
+    });
+    terminal.show();
+    return terminal;
+}
+
 export function openPhaseEditTerminal(name: string): vscode.Terminal {
     const terminal = vscode.window.createTerminal({
         name: `Phase: ${name}`,
