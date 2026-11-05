@@ -66,7 +66,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.window.createTreeView('beamsList', {
         treeDataProvider: provider,
-        showCollapseAll: false,
+        showCollapseAll: true,
     });
 
     vscode.window.createTreeView('beamPhases', {

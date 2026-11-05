@@ -45,6 +45,10 @@ export interface Beam {
     owner: string;
     expires: string;
     url: string;
+    region?: string;
+    requested_region?: string;
+    phase?: string;
+    roles?: string[];
 }
 
 export interface TshStatus {

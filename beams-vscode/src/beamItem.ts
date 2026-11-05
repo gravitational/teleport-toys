@@ -11,10 +11,20 @@ export function setBeamLabel(beamId: string, label: string | undefined): void {
     _labelStore?.update(`beamLabel:${beamId}`, label);
 }
 
+export class BeamDetailItem extends vscode.TreeItem {
+    constructor(label: string, value: string, icon?: string) {
+        super(label, vscode.TreeItemCollapsibleState.None);
+        this.description = value;
+        if (icon) {
+            this.iconPath = new vscode.ThemeIcon(icon);
+        }
+    }
+}
+
 export class BeamItem extends vscode.TreeItem {
     constructor(public readonly beam: Beam) {
         const customLabel = getBeamLabel(beam.id);
-        super(customLabel || beam.id, vscode.TreeItemCollapsibleState.None);
+        super(customLabel || beam.id, vscode.TreeItemCollapsibleState.Collapsed);
 
         const expires = new Date(beam.expires);
         const remaining = Math.max(0, Math.floor((expires.getTime() - Date.now()) / 60000));
