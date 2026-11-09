@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
-import { BeamItem } from './beamItem';
+import { BeamItem, BeamDetailItem } from './beamItem';
 import { listBeams, isTshAvailable, classifyTshError, tshErrorMessage } from './tsh';
 
-export class BeamsProvider implements vscode.TreeDataProvider<BeamItem> {
-    private _onDidChangeTreeData = new vscode.EventEmitter<BeamItem | undefined | null>();
+type BeamTreeItem = BeamItem | BeamDetailItem;
+
+export class BeamsProvider implements vscode.TreeDataProvider<BeamTreeItem> {
+    private _onDidChangeTreeData = new vscode.EventEmitter<BeamTreeItem | undefined | null>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
     private refreshInterval: NodeJS.Timeout | undefined;
@@ -22,11 +24,26 @@ export class BeamsProvider implements vscode.TreeDataProvider<BeamItem> {
         }
     }
 
-    getTreeItem(element: BeamItem): vscode.TreeItem {
+    getTreeItem(element: BeamTreeItem): vscode.TreeItem {
         return element;
     }
 
-    async getChildren(): Promise<BeamItem[]> {
+    async getChildren(element?: BeamTreeItem): Promise<BeamTreeItem[]> {
+        if (element instanceof BeamItem) {
+            const beam = element.beam;
+            return [
+                new BeamDetailItem('ID', beam.id, 'tag'),
+                new BeamDetailItem('URL', beam.url || 'not published', 'link'),
+                new BeamDetailItem('Region', beam.region ?? beam.requested_region ?? '', 'globe'),
+                new BeamDetailItem('Phase', beam.phase ?? '', 'package'),
+                new BeamDetailItem('Roles', beam.roles ? beam.roles.join(', ') : '*', 'shield'),
+                new BeamDetailItem('Expires', new Date(beam.expires).toLocaleString(), 'clock'),
+            ];
+        }
+        if (element instanceof BeamDetailItem) {
+            return [];
+        }
+
         const available = await isTshAvailable();
         if (!available) {
             vscode.window.showErrorMessage(

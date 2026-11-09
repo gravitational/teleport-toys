@@ -42,11 +42,22 @@ test('classifies transport failures as disconnected', () => {
 test('classifies an expired or missing login as auth', () => {
     for (const message of [
         'ERROR: cannot relogin in non-interactive session',
-        'ERROR: access denied to user beams',
         'x509: certificate has expired or is not yet valid',
         'not logged in',
     ]) {
         assert.equal(classifyTshError(err(message)), 'auth', message);
+    }
+});
+
+// "access denied" is an RBAC authorization failure, not an expired session — it fires even
+// with a perfectly valid login (e.g. a beam denied exec access to a sibling beam). Lumping
+// it in with "auth" sends the user off to re-login for a problem re-login can't fix.
+test('classifies access-denied RBAC failures separately from an expired login', () => {
+    for (const message of [
+        'ERROR: access denied to user beams',
+        'ERROR: access denied to beams connecting to 3148646b-a02a-425e-a3a5-b7cb76934d37',
+    ]) {
+        assert.equal(classifyTshError(err(message)), 'denied', message);
     }
 });
 

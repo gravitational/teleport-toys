@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { classifyTshError, listBeams, tshErrorMessage, TshErrorKind } from './tsh';
+import { closeBeamTerminals } from './terminal';
 
 // A disconnected beam usually fails several operations at once (tree refresh, git poll,
 // an open editor) and the tree view re-queries on a timer, so the same condition would
@@ -49,6 +50,13 @@ export function reportDisconnected(beamId: string | undefined, refresh?: () => v
             `${label} is no longer available — it may have expired or been stopped.`
         );
     }
+    // Close any open SSH terminal for this beam ourselves, before the underlying `tsh`
+    // process notices the dropped connection and exits on its own — that would otherwise
+    // trigger VS Code's native "terminal process terminated" alert for what is really just
+    // an expected, ephemeral-beam disconnect.
+    if (beamId) {
+        closeBeamTerminals(beamId);
+    }
     refresh?.();
 }
 
@@ -85,6 +93,16 @@ export function reportTshError(err: unknown, options: ReportOptions): TshErrorKi
                     void vscode.commands.executeCommand('beams.login');
                 }
             });
+        }
+        return kind;
+    }
+
+    if (kind === 'denied') {
+        if (shouldShow(`${beamId ?? '-'}:denied:${action}`)) {
+            const label = beamId ? `Beam "${beamId}"` : 'This resource';
+            vscode.window.showWarningMessage(
+                `${label}: access denied trying to ${action}. Your login is valid, but you may not have permission for this beam.`
+            );
         }
         return kind;
     }
