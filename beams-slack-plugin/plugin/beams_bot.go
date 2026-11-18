@@ -278,7 +278,12 @@ func (r BeamsCommandRunner) Handle(ctx context.Context, teamID, userID, threadKe
 				}
 				if beam, _ := chooseBeam(beams, "", ""); beam != "" {
 					// After the answer is posted, so chat stays fast.
-					go s.recordChatInBeam(context.WithoutCancel(ctx), beam, agent, text, reply)
+					record := func() { s.recordChatInBeam(context.WithoutCancel(ctx), beam, agent, text, reply) }
+					if s.runner.Background != nil {
+						s.runner.Background(record)
+					} else {
+						go record()
+					}
 				}
 				parts := append(append(notes, reply), tellNotes...)
 				return AskResult{Reply: truncateSlackOutput(strings.Join(parts, "\n\n"))}, nil

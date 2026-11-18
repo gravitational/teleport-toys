@@ -73,6 +73,7 @@ func TestBotChatAnswersWithoutBeam(t *testing.T) {
 		MintIdentity: fakeMint,
 		Chat:         chat.chat,
 	}
+	waitForBackground(t, &runner)
 	ctx := t.Context()
 	_, err := runner.Run(ctx, "T1", "UALICE", "connect "+testSessionID)
 	require.NoError(t, err)
@@ -226,6 +227,7 @@ func TestBotAcknowledgesChatAndBeamWorkDifferently(t *testing.T) {
 		MintIdentity: fakeMint,
 		Chat:         chat.chat,
 	}
+	waitForBackground(t, &runner)
 	_, err := runner.Run(t.Context(), "T1", "UALICE", "connect "+testSessionID)
 	require.NoError(t, err)
 	bot := &fakeBeamsBot{}
@@ -322,6 +324,7 @@ func TestBotUsesAttachments(t *testing.T) {
 		MintIdentity: fakeMint,
 		Chat:         chat.chat,
 	}
+	waitForBackground(t, &runner)
 	ctx := t.Context()
 	_, err := runner.Run(ctx, "T1", "UALICE", "connect "+testSessionID)
 	require.NoError(t, err)
@@ -351,6 +354,15 @@ func TestBotUsesAttachments(t *testing.T) {
 	require.Contains(t, string(calls), "- /tmp/slack-attachments/my_notes.txt")
 }
 
+// waitForBackground makes the test wait for work the runner leaves running,
+// such as recording a chat answer in a beam, before its temporary
+// directories are removed. Call it after creating them.
+func waitForBackground(t *testing.T, r *BeamsCommandRunner) {
+	var wg sync.WaitGroup
+	r.Background = wg.Go
+	t.Cleanup(wg.Wait)
+}
+
 func TestChatRecordedInBeamAudit(t *testing.T) {
 	tshPath, logPath := writeFakeTSH(t)
 	chat := &fakeChat{}
@@ -364,6 +376,7 @@ func TestChatRecordedInBeamAudit(t *testing.T) {
 		MintIdentity: fakeMint,
 		Chat:         chat.chat,
 	}
+	waitForBackground(t, &runner)
 	ctx := t.Context()
 	_, err := runner.Run(ctx, "T1", "UALICE", "connect "+testSessionID)
 	require.NoError(t, err)
