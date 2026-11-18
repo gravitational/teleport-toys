@@ -232,7 +232,6 @@ func (r BeamsCommandRunner) Handle(ctx context.Context, teamID, userID, threadKe
 	}
 	if isBeamsListQuestion(text) {
 		s.logRequest(ctx, "list", text)
-		threadPath := filepath.Join(threadsDir, threadKey)
 		if _, err := os.Stat(threadPath); os.IsNotExist(err) {
 			if err := os.WriteFile(threadPath, nil, 0o600); err != nil {
 				return AskResult{}, trace.Wrap(err)
@@ -444,7 +443,7 @@ type threadState struct {
 }
 
 // readThreadState parses "<beam> [new] [claude|codex]", where beam "-" means
-// a chat thread with no beam yet. Older files without an agent used Claude.
+// a chat thread with no beam yet. The agent defaults to Claude.
 func readThreadState(path string) threadState {
 	state := threadState{agent: agentClaude}
 	data, err := os.ReadFile(path)

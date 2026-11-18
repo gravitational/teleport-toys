@@ -73,7 +73,6 @@ type BeamsApp struct {
 func NewBeamsApp(conf BeamsConfig) *BeamsApp {
 	app := &BeamsApp{
 		conf:    conf,
-		runner:  BeamsCommandRunner{Config: conf},
 		seen:    newRecentSet(1000),
 		threads: newThreadQueue(),
 	}

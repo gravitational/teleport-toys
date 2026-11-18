@@ -4,3 +4,4 @@ Small projects and experiments from the Teleport team. (not officially supported
 ## Projects
 
 - [`beams-vscode`](beams-vscode/) — VS Code extension to manage and connect to Teleport Beams: create, monitor, and SSH into ephemeral agentic runtimes.
+- [`beams-slack-plugin`](beams-slack-plugin/) — Slack bot that does work in Teleport Beams as the person who asked: coding agents, quick answers, and beam management.
