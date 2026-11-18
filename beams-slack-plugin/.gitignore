@@ -1,0 +1,8 @@
+# Teleport checkout from scripts/teleport-tree.sh
+.teleport/
+# Local deployment files: never commit tokens or your config
+config.toml
+secrets/
+.env
+bin/
+*.bak

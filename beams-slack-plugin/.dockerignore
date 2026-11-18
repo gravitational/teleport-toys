@@ -1,0 +1,6 @@
+.teleport/
+secrets/
+config.toml
+.env
+terraform/
+assets/

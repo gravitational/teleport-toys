@@ -1,0 +1,57 @@
+# Run from this directory after filling in config.toml and secrets/ (see
+# README "Quick start"):
+#
+#   docker compose up -d --build
+services:
+  # Named volumes start out owned by root; hand them to the UID both
+  # containers run as so tbot can write and the plugin can read.
+  volume-init:
+    image: busybox:1.37
+    command: ["chown", "-R", "10001:10001", "/var/lib/tbot", "/identity", "/beams"]
+    volumes:
+      - tbot-state:/var/lib/tbot
+      - plugin-identity:/identity
+      - beams-profiles:/beams
+    restart: "no"
+
+  tbot:
+    image: public.ecr.aws/gravitational/tbot-distroless:18.11.10
+    command: ["start", "-c", "/etc/tbot.yaml"]
+    user: "10001:10001"
+    restart: unless-stopped
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./tbot.yaml:/etc/tbot.yaml:ro
+      - ./secrets/tbot-token:/secrets/tbot-token:ro
+      - tbot-state:/var/lib/tbot
+      - plugin-identity:/identity
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  teleport-slack:
+    # Built from this directory. Set BEAMS_SLACK_PLUGIN_IMAGE to run an image
+    # you pushed to a registry instead.
+    image: ${BEAMS_SLACK_PLUGIN_IMAGE:-beams-slack-plugin:local}
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - tbot
+    volumes:
+      - ./config.toml:/etc/teleport-slack/config.toml:ro
+      - ./secrets:/var/lib/teleport/plugins/slack:ro
+      - plugin-identity:/var/lib/teleport-slack/identity:ro
+      - beams-profiles:/var/lib/teleport-slack/beams
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  tbot-state:
+  plugin-identity:
+  # Per-user delegation sessions and bot thread state.
+  beams-profiles:
