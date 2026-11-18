@@ -98,8 +98,7 @@ Confirmed in Teleport v18 source. Don't "simplify" around them.
   app cert with `RouteToApp` and call the app's public address directly.
 - **Never act on beams as the bot.** Published apps are labelled
   `teleport.internal/beams/owner`, and `beam-user` only grants access to your
-  own, so bot-owned beams' URLs are unreachable for the human. An earlier
-  version did this; it was removed.
+  own, so bot-owned beams' URLs are unreachable for the human.
 - `tsh beams publish` always publishes port 8080. `tsh beams exec` runs one
   string over SSH. A brand-new beam rejects SSH until it gets a node, which
   `tsh beams ls` doesn't expose, so the runner retries that error every 5s for

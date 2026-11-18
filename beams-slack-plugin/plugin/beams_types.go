@@ -75,7 +75,6 @@ type SlackFile struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Mimetype   string `json:"mimetype"`
-	Size       int64  `json:"size"`
 	URLPrivate string `json:"url_private"`
 }
 
@@ -121,19 +120,14 @@ func UnmarshalBeamsMessageEvent(data []byte) (BeamsMessageEvent, error) {
 
 // SlashCommandEvent is delivered by Slack Socket Mode for a slash command.
 type SlashCommandEvent struct {
-	PayloadType string `json:"type"`
 	Command     string `json:"command"`
 	Text        string `json:"text"`
 	ResponseURL string `json:"response_url"`
-	TriggerID   string `json:"trigger_id"`
 	UserID      string `json:"user_id"`
-	UserName    string `json:"user_name"`
 	TeamID      string `json:"team_id"`
-	TeamDomain  string `json:"team_domain"`
 	ChannelID   string `json:"channel_id"`
-	ChannelName string `json:"channel_name"`
 }
 
 func (SlashCommandEvent) Type() InteractionEventType {
-	return InteractionEventType("slash_commands")
+	return SocketModeEventTypeSlashCommands
 }

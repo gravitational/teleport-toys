@@ -65,8 +65,6 @@ type incidentFix struct {
 	URI   string `json:"uri"`
 	// Status is what systemctl reported for nginx when the site was down.
 	Status string `json:"status"`
-	// Incident is the reference number posted in the thread.
-	Incident int `json:"incident"`
 }
 
 func incidentFixPath(threadPath string) string {
@@ -124,7 +122,7 @@ func (s beamsSession) runIncident(ctx context.Context, threadPath, text string, 
 		parts = append(parts, s.incidentTellOwner(ctx, threadPath, target))
 		incident := 40000 + rand.IntN(60000)
 		parts = append(parts, fmt.Sprintf("I'm tracking this as incident #%d.", incident))
-		found, err := s.incidentCheckWebsite(ctx, threadPath, beams, threadBeam, text, incident)
+		found, err := s.incidentCheckWebsite(ctx, threadPath, beams, threadBeam, text)
 		if err != nil {
 			return "", true, trace.Wrap(err)
 		}
@@ -144,7 +142,7 @@ func (s beamsSession) runIncident(ctx context.Context, threadPath, text string, 
 
 // incidentCheckWebsite finds the app with a hosted-on label and checks nginx on
 // that server. If nginx is down, it offers to start it.
-func (s beamsSession) incidentCheckWebsite(ctx context.Context, threadPath string, beams []map[string]any, threadBeam, text string, incident int) (string, error) {
+func (s beamsSession) incidentCheckWebsite(ctx context.Context, threadPath string, beams []map[string]any, threadBeam, text string) (string, error) {
 	beam, _ := chooseBeam(beams, threadBeam, text)
 	if beam == "" {
 		reportProgress(ctx, "Starting a beam to work from…")
@@ -202,7 +200,6 @@ func (s beamsSession) incidentCheckWebsite(ctx context.Context, threadPath strin
 	}
 
 	fix.Status = status
-	fix.Incident = incident
 	data, err := json.Marshal(fix)
 	if err != nil {
 		return "", trace.Wrap(err)

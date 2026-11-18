@@ -103,6 +103,9 @@ func (c *Config) checkAndSetBeamsDefaults() error {
 	if c.Beams.PluginIdentity == "" {
 		return trace.BadParameter("missing required value beams.plugin_identity")
 	}
+	if c.Beams.BotName == "" {
+		return trace.BadParameter("missing required value beams.bot_name")
+	}
 	if c.Beams.RequiredRole == "" && len(c.Beams.Users) == 0 {
 		return trace.BadParameter("beams requires required_role or users")
 	}

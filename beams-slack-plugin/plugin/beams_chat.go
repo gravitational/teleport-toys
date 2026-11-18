@@ -106,7 +106,7 @@ func (s beamsSession) chatTurn(ctx context.Context, historyPath, agent, text str
 
 	chat := s.runner.Chat
 	if chat == nil {
-		chat = s.callLLMApp
+		chat = callLLMApp
 	}
 	reply, err = chat(ctx, s, agent, messages)
 	if err != nil {
@@ -175,7 +175,7 @@ func chatContext(history []chatMessage) string {
 // callLLMApp sends the chat to the Teleport LLM app for the agent, as the
 // user: the delegation API mints a certificate for the app and starts an app
 // session, so Teleport attributes and audits the request.
-func (s beamsSession) callLLMApp(ctx context.Context, _ beamsSession, agent string, messages []chatMessage) (string, error) {
+func callLLMApp(ctx context.Context, s beamsSession, agent string, messages []chatMessage) (string, error) {
 	appName := "anthropic"
 	if agent == agentCodex {
 		appName = "openai"

@@ -236,6 +236,7 @@ All settings are under `[beams]` in `config.toml`. See
 | `proxy` | `teleport.addr` | Tenant proxy address for `tsh` |
 | `plugin_identity` | `teleport.identity` | Identity file written by `tbot` |
 | `profiles_dir` | temp dir | Per-user state (delegation sessions, threads) |
+| `tsh_path` | `tsh` | Path to the `tsh` binary |
 | `delegation_ttl` | `168h` | Session length in the suggested `tsh` command (maximum 7 days) |
 | `identity_ttl` | `15m` | Lifetime of each per-command certificate |
 | `command_timeout` | `2m` | Time limit for `tsh` commands |
