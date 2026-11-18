@@ -1,0 +1,121 @@
+diff --git a/integrations/access/slack/bot.go b/integrations/access/slack/bot.go
+index d0abf81..4d6a613 100644
+--- a/integrations/access/slack/bot.go
++++ b/integrations/access/slack/bot.go
+@@ -35,6 +35,7 @@ import (
+ 	appAccesslist "github.com/gravitational/teleport/integrations/access/accesslist"
+ 	"github.com/gravitational/teleport/integrations/access/accessrequest"
+ 	"github.com/gravitational/teleport/integrations/access/common"
++	"github.com/gravitational/teleport/integrations/access/common/auth"
+ 	"github.com/gravitational/teleport/integrations/lib"
+ 	"github.com/gravitational/teleport/integrations/lib/logger"
+ 	pd "github.com/gravitational/teleport/integrations/lib/plugindata"
+@@ -62,7 +63,10 @@ type Bot struct {
+ 	webProxyURL *url.URL
+ 	// reviewConfig is the configuration for native review.
+ 	reviewConfig ReviewConfig
+-	clock        clockwork.Clock
++	// beamsConfig and botToken are used by the Beams app (beams_*.go).
++	beamsConfig BeamsConfig
++	botToken    auth.AccessTokenProvider
++	clock       clockwork.Clock
+ }
+ 
+ // onAfterResponseSlack resty error function for Slack
+@@ -110,6 +114,9 @@ func (b Bot) SupportedApps() []common.App {
+ 	if b.reviewConfig.Enabled {
+ 		apps = append(apps, NewReviewApp(b.reviewConfig))
+ 	}
++	if b.beamsConfig.Enabled {
++		apps = append(apps, NewBeamsApp(b.beamsConfig))
++	}
+ 	return apps
+ }
+ 
+diff --git a/integrations/access/slack/config.go b/integrations/access/slack/config.go
+index e27fd00..1143dfc 100644
+--- a/integrations/access/slack/config.go
++++ b/integrations/access/slack/config.go
+@@ -39,6 +39,7 @@ type Config struct {
+ 	common.BaseConfig
+ 	Slack               common.GenericAPIConfig
+ 	Review              ReviewConfig
++	Beams               BeamsConfig
+ 	AccessTokenProvider auth.AccessTokenProvider `json:"-"`
+ 	AppTokenProvider    auth.AccessTokenProvider `json:"-"`
+ 	StatusSink          common.StatusSink
+@@ -131,6 +132,10 @@ func (c *Config) CheckAndSetDefaults() error {
+ 		}
+ 	}
+ 
++	if err := c.checkAndSetBeamsDefaults(); err != nil {
++		return trace.Wrap(err)
++	}
++
+ 	if c.Log.Output == "" {
+ 		c.Log.Output = "stderr"
+ 	}
+@@ -201,6 +206,8 @@ func (c *Config) NewBot(clusterName, webProxyAddr string) (common.MessagingBot,
+ 		clusterName:  clusterName,
+ 		webProxyURL:  webProxyURL,
+ 		reviewConfig: c.Review,
++		beamsConfig:  c.Beams,
++		botToken:     c.AccessTokenProvider,
+ 		clock:        c.Clock,
+ 	}, nil
+ }
+diff --git a/integrations/access/slack/socketmode.go b/integrations/access/slack/socketmode.go
+index 831a3dd..fbb7930 100644
+--- a/integrations/access/slack/socketmode.go
++++ b/integrations/access/slack/socketmode.go
+@@ -293,7 +293,23 @@ func (smc *SocketModeClient) parseEvents(ctx context.Context, rawCh <-chan json.
+ 
+ 				// Socket Mode server wants to rebuild WebSocket connection.
+ 				return trace.Wrap(ErrSocketModeDisconnect)
+-			case SocketModeEventTypeInteractive:
++			case SocketModeEventTypeEventsAPI:
++				select {
++				case ackCh <- e.EnvelopeID:
++				case <-ctx.Done():
++					return ctx.Err()
++				}
++				event, err := UnmarshalBeamsMessageEvent(e.Payload)
++				if err != nil {
++					log.WarnContext(ctx, "Failed to decode Events API payload, skipping...", "error", err)
++					continue
++				}
++				select {
++				case smc.interactionsCh <- event:
++				case <-ctx.Done():
++					return ctx.Err()
++				}
++			case SocketModeEventTypeInteractive, SocketModeEventTypeSlashCommands:
+ 				log.DebugContext(ctx, "Received interaction event")
+ 
+ 				// Send an ack to the write goroutine immediately.
+@@ -304,10 +320,21 @@ func (smc *SocketModeClient) parseEvents(ctx context.Context, rawCh <-chan json.
+ 					return ctx.Err()
+ 				}
+ 
+-				interaction, err := UnmarshalInteractionEvent(e.Payload)
+-				if err != nil {
+-					log.WarnContext(ctx, "Unsupported interaction event, skipping...", "error", err)
+-					continue
++				var interaction InteractionEvent
++				if e.Type == SocketModeEventTypeSlashCommands {
++					var slashCommand SlashCommandEvent
++					if err := json.Unmarshal(e.Payload, &slashCommand); err != nil {
++						log.WarnContext(ctx, "Failed to decode slash command, skipping...", "error", err)
++						continue
++					}
++					interaction = slashCommand
++				} else {
++					var err error
++					interaction, err = UnmarshalInteractionEvent(e.Payload)
++					if err != nil {
++						log.WarnContext(ctx, "Unsupported interaction event, skipping...", "error", err)
++						continue
++					}
+ 				}
+ 
+ 				// Send to consumer app to handle interactions downstream.

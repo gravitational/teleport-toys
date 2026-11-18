@@ -1,0 +1,49 @@
+# Copy to config.toml and replace example-beams-tenant.beams.sh with your
+# Beams tenant. Paths match docker-compose.yml.
+
+[teleport]
+addr = "example-beams-tenant.beams.sh:443"
+identity = "/var/lib/teleport-slack/identity/identity"
+refresh_identity = true
+
+[slack]
+token = "/var/lib/teleport/plugins/slack/slack-bot-token"
+
+[review]
+enabled = false
+# Socket Mode app-level token (xapp-...). Read here even with review disabled.
+app_token = "/var/lib/teleport/plugins/slack/slack-app-token"
+
+[beams]
+enabled = true
+tsh_path = "/usr/local/bin/tsh"
+proxy = "example-beams-tenant.beams.sh:443"
+plugin_identity = "/var/lib/teleport-slack/identity/identity"
+profiles_dir = "/var/lib/teleport-slack/beams"
+# Machine ID bot users delegate to. Must match tbot's bot.
+bot_name = "teleport-beams-bot"
+delegation_ttl = "168h"
+# Slack users get in when their Slack email is a Teleport user with this role.
+required_role = "beam-user"
+
+# Timeouts for tsh commands and coding-agent runs.
+command_timeout = "2m"
+claude_timeout = "15m"
+codex_timeout = "15m"
+
+# The "live website is down" incident flow (see README). Off by default.
+# incident_response = true
+# incident_ssh_login = "root"
+# service_owner = "Alex Rivera"
+
+# Optional Slack user ID -> Teleport username overrides.
+# [beams.users]
+# "U0123456789" = "alice@example.com"
+
+# The underlying access plugin requires at least one recipient.
+[role_to_recipients]
+"*" = ["beams-access"]
+
+[log]
+output = "stderr"
+severity = "INFO"
