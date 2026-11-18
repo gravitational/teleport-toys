@@ -103,6 +103,7 @@ func tellRunner(t *testing.T, reply string) (BeamsCommandRunner, *fakeSlack, str
 		FindPeople: slack.find,
 		Post:       slack.post,
 	}
+	waitForBackground(t, &runner)
 	_, err := runner.Run(t.Context(), "T1", "UALICE", "connect "+testSessionID)
 	require.NoError(t, err)
 	return runner, slack, logPath

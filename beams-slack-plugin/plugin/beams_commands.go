@@ -92,6 +92,10 @@ type BeamsCommandRunner struct {
 	FindPeople func(ctx context.Context, query string) ([]SlackPerson, error)
 	// Post sends a Slack message, in a thread when threadTS is set.
 	Post func(ctx context.Context, channel, threadTS, text string) error
+	// Background runs work a request leaves going after it returns, such as
+	// recording a chat answer in a beam. It defaults to a new goroutine;
+	// tests replace it so they can wait for that work.
+	Background func(f func())
 }
 
 // beamsSession is the per-command execution context for one Slack user.
