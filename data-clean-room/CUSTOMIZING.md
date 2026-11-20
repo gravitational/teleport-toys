@@ -15,6 +15,14 @@ How to change what Clean Room measures and how it reports, and how to work on th
 | Rating scale (what counts as a top performer) | `TOP` in `worker/compute_metrics.py` | The scale in `worker/playbook.md`, section 3 |
 | Minimum group size | `MIN_GROUP` in `worker/compute_metrics.py` | `MIN_GROUP` in `app.py` (the privacy gate) |
 | Privacy gate rules | The pattern lists in `app.py` | Section 5 of `worker/playbook.md` |
+| Reference date | `CLEAN_ROOM_REFERENCE_DATE` (see below) | Nothing; the dashboard shows the date it used |
+| Orgs and measure IDs the app will release | `ORGS` and `METRIC_IDS` in `app.py` | `ORGS` and `THRESHOLDS` in `worker/compute_metrics.py`. Anything not listed in `app.py` is dropped before release. |
+
+### Reference date
+
+The "last 12 months" (and 2- and 3-year) measures count back from a reference date. Set it with `CLEAN_ROOM_REFERENCE_DATE=YYYY-MM-DD`. If it's not set, the app uses today's date for database data, and `2026-10-01` for the bundled sample CSV, which is the date the sample's planted patterns were built around. Hires, departures and promotions dated after the reference date are ignored, so a run describes the org as it was on that date. To run the sample database (`people_seed.sql`) and see the results in the README, set `CLEAN_ROOM_REFERENCE_DATE=2026-10-01`.
+
+You can also run the metrics script on its own: `python3 worker/compute_metrics.py people.csv metrics.json 2026-10-01`.
 
 **After any change in `worker/`, rebuild the worker image** so new runs pick it up:
 
@@ -60,7 +68,7 @@ pip install flask
 CLEAN_ROOM_LOCAL=1 python3 app.py
 ```
 
-Inside a Beam, practice mode uses the Beam's built-in Claude, so you see real insights on the sample data. To view the app, run `tsh beams publish <build-beam-name>` from your laptop and open the link it prints.
+Inside a Beam, practice mode uses the Beam's built-in Claude, so you see real insights on the sample data. In practice mode Claude runs with read-only tools (`Read`, `Glob`, `Grep`) and never with `bypassPermissions`, because it runs on the same machine as the app. To view the app, run `tsh beams publish <build-beam-name>` from your laptop and open the link it prints. If the link can't reach the app, start it with `CLEAN_ROOM_HOST=0.0.0.0`.
 
 Edit `worker/playbook.md` or `worker/compute_metrics.py`, run again, and repeat.
 

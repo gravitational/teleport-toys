@@ -121,20 +121,22 @@ The agent writes results as a structured file. A fixed template renders it as th
 
 The privacy gate runs after the agent finishes and blocks any read-out that contains:
 
-1. A number based on fewer than **5 people**. (`compute_metrics.py` also suppresses these before the agent sees them.)
-2. A currency amount. Comp appears only as band positions and percentages.
-3. An `emp_code` or `manager_code`.
-4. A phrase that points to a very small group, such as "the only," "a single" or "3 people."
-5. An email address, SSN-like or bank-account-like pattern.
+1. A number that describes fewer than **5 people**: a population under 5, or a count within it (or the remainder) of 1 to 4. (`compute_metrics.py` suppresses these before the agent sees them, and the gate checks again.)
+2. A company figure that, minus the visible org figures, would reveal a suppressed org's number. `compute_metrics.py` treats all the hidden orgs for a measure as one group and hides the company figure if that group is under the minimum too; the gate repeats the subtraction as a check.
+3. A currency amount. Comp appears only as band positions and percentages.
+4. An `emp_code` or `manager_code`.
+5. A phrase that points to a very small group, such as "the only," "a single," "3 people," "two engineers" or "one employee."
+6. An email address, SSN-like or bank-account-like pattern.
+7. An insight about a measure that is suppressed for that org, or a measure ID, org or field the app doesn't know. Only the `metric`, `what`, `why` and `next_step` fields of each insight are kept, and every one of them is checked.
 
-Blocked read-outs go back to the agent with the reason and the phrase that triggered it, for example: `M2 for Product is based on 3 people (minimum 5)`. The agent gets up to 3 tries.
+Blocked read-outs go back to the agent with the reason and the phrase that triggered it, for example: `Sales insight 2 why: reference to a very small group ("two engineers")`. The agent gets up to 3 tries. The person running the app sees only the reason, not the phrase.
 
 ### Followed by the agent
 
 These aren't checked automatically, so the agent must follow them:
 
 - Never describe any individual's rating, level history, dates or other attributes.
-- Never let a small group be worked out by subtraction. Example: showing a team's total and every subteam except one exposes the last subteam. If that hidden piece is under 5 people, don't report the visible pieces separately.
+- Never let a small group be worked out by subtraction in the text. The org and company figures are protected automatically, but the agent must not add its own breakdowns (for example a team's total and every subteam except one, which exposes the last subteam).
 
 To change the minimum group size, update `MIN_GROUP` in both `compute_metrics.py` and `app.py`.
 
@@ -148,6 +150,6 @@ The fictional sample data has problems planted in it, so you can check a run is 
 |---|---|---|
 | Engineering | R2 regretted attrition, R4 high-performer stall, C2 top performers paid low | R1 on watch |
 | Product | M1 span, M2 very small teams, M3 manager churn | R2 and C3 suppressed (under 5 people) |
-| Sales | R1 attrition, R3 first-year attrition, C3 pay compression | R4 on watch |
+| Sales | R1 attrition, R3 first-year attrition, C3 pay compression | R2, R4 and C2 suppressed |
 | Marketing | P1 rating skew, P2 promotion rate | R2 suppressed |
 | G&A | None (healthy comparison) | R2 suppressed |

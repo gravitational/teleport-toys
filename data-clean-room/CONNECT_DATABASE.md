@@ -16,7 +16,7 @@ With a database, nothing about the clean room changes except where the data come
 
 ## What you need
 
-- A Teleport cluster with Beams enabled, and `tsh` **18.11.9 or newer** ([download](https://goteleport.com/download/client-tools/)).
+- A Teleport cluster with Beams enabled, and `tsh` **18.11.10 or newer** ([download](https://goteleport.com/download/client-tools/)).
 - Permission to run `tctl` (to create a role and update a user).
 - A Postgres database you can enroll with Teleport. For a quick trial, the Beams Database Demo walks through running one locally in Docker.
 - This repository, set up per the main [README](README.md).
@@ -47,7 +47,7 @@ You should see your database name and label in the list.
 | Object | What it is |
 |---|---|
 | `people` table | The raw data, **including** names, emails and other sensitive columns. Fake sample data for about 300 employees. |
-| `v_people_coded` view | The only thing the agent can read. No names, emails, SSNs or bank details. People and managers appear as random-looking codes. |
+| `v_people_coded` view | The only thing the agent can read. No names, emails, SSNs or bank details. People and managers appear as short codes. |
 | `readonly_analyst` | A read-only Postgres user with access to the view and nothing else. |
 
 Create the database and user, then run the script as a database admin. If you followed the Database Demo, run these on the machine hosting the Postgres container:
@@ -60,6 +60,10 @@ docker exec -i postgres psql -U postgres -d hr_demo < database/people_seed.sql
 ```
 
 **Using your own HR data?** Skip the sample table, and create a view named `v_people_coded` over your own tables with the same columns. The column list and meanings are in [`worker/playbook.md`](worker/playbook.md), section 3. Leave out anything that identifies a person: names, emails, government IDs, bank details. Then grant `SELECT` on the view, and only the view, to `readonly_analyst`.
+
+> **The sample codes are not secret.** The sample view makes codes with `md5('lark-' || emp_id)`. Anyone who knows that recipe can rebuild the code for every sequential ID and match codes back to people. For real data, use a secret salt that the agent and the database user can't read, for example `md5(<secret> || emp_id)` with the secret kept outside the view definition, or a separate mapping table of random codes that only an admin can read.
+
+> **The sample script replaces two objects.** `people_seed.sql` drops and recreates the `people` table and the `v_people_coded` view if they exist. Run it only in a database where those names are free or hold the sample data.
 
 ---
 

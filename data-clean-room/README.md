@@ -10,11 +10,11 @@ One click in the web app (`app.py`):
 
 1. **Creates a fresh worker Beam** from the `clean-room-worker` image, with only the Teleport roles you choose. The image is a Teleport [Phase](https://goteleport.com/docs/beams/#building-reusable-images-with-phases) with the metrics script and playbook built in, and no data.
 2. **Brings the data in:** copies a sample CSV into the Beam, or pulls a no-names view from your database through Teleport ([CONNECT_DATABASE.md](CONNECT_DATABASE.md)). Data arrives fresh in every run and never goes into the image.
-3. **Computes 14 org-health measures inside the Beam** (`worker/compute_metrics.py`). Any number based on fewer than 5 people is suppressed. Raw rows never leave.
+3. **Computes 14 org-health measures inside the Beam** (`worker/compute_metrics.py`). Any number that describes fewer than 5 people is suppressed: a small population, a small count within it (such as 1 leaver), or a small remainder. A company figure is also hidden when subtracting the visible orgs from it would reveal a suppressed one. Raw rows never leave.
 4. **Runs Claude inside the Beam** to write up to 3 insights per org, following `worker/playbook.md`.
-5. **Checks everything before release.** The privacy gate blocks names, codes, dollar amounts, groups under 5 people, phrases like "the only one," and SSN, bank and email patterns. Blocked output goes back to Claude with the triggering phrase quoted, up to 3 tries.
+5. **Checks everything before release.** The app rebuilds the metrics and insights from known orgs, measures and fields only, then the privacy gate checks every string it will show or save. It blocks employee and manager codes, dollar amounts, numbers based on fewer than 5 people, small-group phrases ("the only one," "two engineers"), and SSN, bank and email patterns. It does **not** detect names: keeping names out is the job of the no-names view. Blocked output goes back to Claude inside the Beam with the triggering phrase quoted, up to 3 tries; the browser only sees which rule fired, never the blocked text.
 6. **Shows a red/yellow/green dashboard** per org, with suppressed numbers marked "Suppressed (<5)."
-7. **Deletes the Beam**, even if something failed, and prints a **run receipt**: Beam ID, the image it used, what went in (with a fingerprint), what came out, and the outcome.
+7. **Deletes the Beam**, even if something failed or the browser was closed, checks with `tsh beams ls` that it is gone, and prints a **run receipt**: Beam ID, the image it used, whether teardown was confirmed, what went in (with a fingerprint), what came out, and the outcome. If teardown can't be confirmed, the receipt says so and gives the command to remove the Beam.
 
 ![Architecture](assets/architecture.png)
 
@@ -91,7 +91,9 @@ Then open http://localhost:8080. Each run creates a Beam from the image and dele
 
 **Without the image:** leave out `CLEAN_ROOM_PHASE`, and the app copies the toolkit into each Beam instead. This works, but the image is the recommended setup: its contents are defined in `phase.yaml` and can be reviewed, and runs have fewer steps.
 
-**Running the app inside a Beam instead of your laptop:** start it there the same way, then run `tsh beams publish <beam-id>` to share it through Teleport.
+**The app has no login,** so it listens on `127.0.0.1` only by default. Anyone who can reach it can start runs and download reports.
+
+**Running the app inside a Beam instead of your laptop:** start it there the same way, then run `tsh beams publish <beam-id>` to share it through Teleport. If the published link can't reach the app, start it with `CLEAN_ROOM_HOST=0.0.0.0`; Teleport controls who can open the published link.
 
 ### Settings
 
@@ -102,7 +104,9 @@ Then open http://localhost:8080. Each run creates a Beam from the image and dele
 | `TELEPORT_CLUSTER` | | Cluster that hosts the worker Beams (shown in the UI) |
 | `CLEAN_ROOM_DATA_SOURCE` | `csv` | `csv` or `database`. See [CONNECT_DATABASE.md](CONNECT_DATABASE.md). |
 | `CLEAN_ROOM_DB`, `CLEAN_ROOM_DB_USER`, `CLEAN_ROOM_DB_NAME`, `CLEAN_ROOM_DB_VIEW` | see guide | Database settings for `database` mode |
-| `CLEAN_ROOM_LOCAL=1` | off | Simulate worker Beams locally |
+| `CLEAN_ROOM_REFERENCE_DATE` | today (database), `2026-10-01` (sample CSV) | Date the "last 12 months" measures count back from, `YYYY-MM-DD`. Anything dated after it is ignored. See [CUSTOMIZING.md](CUSTOMIZING.md). |
+| `CLEAN_ROOM_HOST`, `CLEAN_ROOM_PORT` | `127.0.0.1`, `8080` | Where the web UI listens. Only use `0.0.0.0` on a network you control. |
+| `CLEAN_ROOM_LOCAL=1` | off | Simulate worker Beams locally. If `claude` is on your PATH and `CLEAN_ROOM_FAKE_AGENT` is off, Claude runs on this machine with read-only tools. |
 | `CLEAN_ROOM_FAKE_AGENT=1` | off | Skip Claude and use placeholder insights |
 
 ## Customizing it
@@ -152,7 +156,7 @@ The fictional data has problems planted in it, so you can check a run is working
 |---|---|---|
 | Engineering | Regretted attrition (R2), high-performer stall (R4, ~72%), top performers paid low (C2) | Attrition on watch (R1) |
 | Product | Narrow spans (M1), very small teams (M2), manager churn (M3) | R2 and C3 suppressed (under 5 people) |
-| Sales | Attrition (R1), first-year attrition (R3), pay compression (C3) | High-performer stall on watch (R4) |
+| Sales | Attrition (R1), first-year attrition (R3), pay compression (C3) | R2, R4 and C2 suppressed (a count or its remainder is under 5 people) |
 | Marketing | Rating inflation (P1), promotion rate (P2) | R2 suppressed |
 | G&A | None: the healthy comparison org | R2 suppressed |
 

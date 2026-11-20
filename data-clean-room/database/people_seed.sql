@@ -1,16 +1,21 @@
 -- =====================================================================
--- Org Health Clean Room: fake people data for the Beams hackathon
+-- Clean Room: fake people data for the sample database
 -- Fictional company "Larkspur Labs", ~300 active employees + recent leavers.
 -- All names, emails, SSNs and bank details are FAKE.
 --
--- Run against the existing hr_demo database:
+-- Run against the hr_demo database:
 --   psql -d hr_demo -f database/people_seed.sql
 --
--- Adds (does not change Riley's existing tables, views or role):
+-- WARNING: this script DROPS and recreates these two objects if they exist:
 --   people          raw table, includes sensitive columns
 --   v_people_coded  coded view: no names, emails, SSNs or bank details
---   SELECT on v_people_coded granted to the existing readonly_analyst role
--- Reference date for all "last 12 months" measures: 2026-10-01
+-- It also grants SELECT on v_people_coded to the existing readonly_analyst
+-- role and revokes that role's access to people. It doesn't touch any other
+-- table, view or role.
+--
+-- The sample data's planted patterns are built around the reference date
+-- 2026-10-01. Set CLEAN_ROOM_REFERENCE_DATE=2026-10-01 to reproduce the
+-- results in the README.
 -- Rating scale: 1 (below) to 4 (exceeds). 4 = top performer.
 -- =====================================================================
 
@@ -408,8 +413,12 @@ INSERT INTO people (emp_id, full_name, email, ssn, bank_account, org, team, job_
 
 -- Coded view: the ONLY thing the agent can read.
 -- Names, emails, SSNs and bank details are excluded. People and managers
--- appear as short random-looking codes that can't be traced back to the
--- raw table without access to it.
+-- appear as short codes.
+--
+-- SAMPLE ONLY: these codes use a fixed, public salt ('lark-'), so anyone can
+-- rebuild them from the sequential emp_ids. For real data, use a secret salt
+-- the agent and readonly_analyst can't read, or a mapping table of random
+-- codes that only an admin can read. See CONNECT_DATABASE.md.
 CREATE VIEW v_people_coded AS
 SELECT
     left(md5('lark-' || p.emp_id::text), 10)            AS emp_code,

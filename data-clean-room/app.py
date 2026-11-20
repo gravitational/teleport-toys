@@ -19,16 +19,18 @@ import html
 import json
 import logging
 import os
+import queue
 import re
 import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 
 import flask.cli
-from flask import Flask, Response, request, send_from_directory, stream_with_context
+from flask import Flask, Response, abort, request, send_from_directory
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 flask.cli.show_server_banner = lambda *args, **kwargs: None
@@ -65,6 +67,32 @@ TOOLKIT_FILES = ["playbook.md", "compute_metrics.py"]
 
 REMOTE_DIR = "/home/beams/cleanroom"
 MIN_GROUP = 5
+
+# Reference date for "last 12 months" measures (YYYY-MM-DD). Default: today for
+# database data, and 2026-10-01 for the bundled sample CSV (the date its planted
+# patterns were built around). Events after this date are ignored.
+REFERENCE_DATE = os.environ.get("CLEAN_ROOM_REFERENCE_DATE", "")
+SAMPLE_REFERENCE_DATE = "2026-10-01"
+if REFERENCE_DATE and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", REFERENCE_DATE):
+    raise SystemExit(f"CLEAN_ROOM_REFERENCE_DATE must look like 2026-10-01, got {REFERENCE_DATE!r}")
+
+
+def reference_date(from_database):
+    if REFERENCE_DATE:
+        return REFERENCE_DATE
+    return time.strftime("%Y-%m-%d") if from_database else SAMPLE_REFERENCE_DATE
+
+# The app has no login, so by default only this machine can reach it. Set
+# CLEAN_ROOM_HOST=0.0.0.0 only on a network you control (for example inside a
+# Beam you share with `tsh beams publish`, where Teleport handles access).
+HOST = os.environ.get("CLEAN_ROOM_HOST", "127.0.0.1")
+PORT = int(os.environ.get("CLEAN_ROOM_PORT", "8080"))
+
+
+def new_run_dir():
+    run_dir = os.path.join(REPORTS_DIR, uuid.uuid4().hex[:8])
+    os.makedirs(run_dir)
+    return run_dir
 
 FORMAT_INSTRUCTION = (
     " Format your entire response as clean Markdown: a top-level '# ' "
@@ -114,6 +142,25 @@ def run_cmd(args, timeout, input_text=None):
     return subprocess.run(args, capture_output=True, text=True, timeout=timeout, input=input_text)
 
 
+def list_beam_ids():
+    """IDs from `tsh beams ls`, or None if the list can't be read."""
+    try:
+        r = run_cmd(["tsh", "beams", "ls", "-f", "json"], timeout=60)
+        if r.returncode != 0:
+            return None
+        data = json.loads(r.stdout or "[]")
+        return {b.get("id") for b in data if isinstance(b, dict) and b.get("id")}
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        return None
+
+
+# Provisioning is serialized so that a before/after `tsh beams ls` diff
+# identifies the beam this run created, even when `tsh beams add` output
+# can't be parsed.
+PROVISION_LOCK = threading.Lock()
+TEARDOWN_CONFIRM_SECONDS = 30
+
+
 class Worker:
     """One disposable worker Beam. In LOCAL mode, a temp directory stands in."""
 
@@ -122,6 +169,10 @@ class Worker:
         self.local_dir = None
         self.copied_in = {}
         self.image = "default Beam image"
+        # Beams that may exist but that we couldn't identify for sure. The
+        # receipt lists them so the user can check and remove them.
+        self.unaccounted = []
+        self.teardown_status = "no beam was created"
 
     def provision(self):
         if LOCAL:
@@ -134,16 +185,39 @@ class Worker:
         if PHASE:
             cmd.append(f"--phase={PHASE}")        # start from the prebuilt worker image
             self.image = f"{PHASE} (Phase)"
-        result = run_cmd(cmd, timeout=120)
-        if result.returncode != 0:
-            raise RuntimeError(f"beam provisioning failed: {result.stderr.strip()}")
-        data = json.loads(result.stdout)
-        if isinstance(data, list):
-            data = data[0]
-        self.beam_id = data.get("id") or data.get("ID")
-        if not self.beam_id:
-            raise RuntimeError(f"could not find beam id in: {result.stdout.strip()}")
-        return self.beam_id
+        with PROVISION_LOCK:
+            before = list_beam_ids()
+            result, error = None, None
+            try:
+                result = run_cmd(cmd, timeout=120)
+            except subprocess.TimeoutExpired:
+                error = "beam provisioning timed out"
+            if result is not None:
+                if result.returncode != 0:
+                    error = f"beam provisioning failed: {result.stderr.strip()}"
+                else:
+                    try:
+                        data = json.loads(result.stdout)
+                        if isinstance(data, list):
+                            data = data[0]
+                        self.beam_id = data.get("id") or data.get("ID")
+                    except (ValueError, IndexError, AttributeError):
+                        pass
+                    if not self.beam_id:
+                        error = f"could not find beam id in: {result.stdout.strip()[:200]}"
+            if self.beam_id:
+                return self.beam_id
+            # `add` may have created a beam even though we can't tell its ID
+            # from the output. Find it by diffing the beam list.
+            after = list_beam_ids()
+            new = sorted(after - before) if before is not None and after is not None else None
+            if new is None:
+                self.unaccounted = ["unknown (couldn't list beams to check)"]
+            elif len(new) == 1:
+                self.beam_id = new[0]   # ours: torn down in teardown()
+            else:
+                self.unaccounted = new  # 0 = nothing created; 2+ = can't tell which
+        raise RuntimeError(error)
 
     def wait_ready(self, max_wait=90, interval=3):
         if LOCAL:
@@ -194,12 +268,39 @@ class Worker:
             raise RuntimeError(f"copy out of beam failed: {r.stderr.strip()}")
 
     def teardown(self):
+        """Delete the beam, then check it's gone. Sets self.teardown_status and
+        returns True only if removal is confirmed."""
         if LOCAL:
             if self.local_dir:
                 shutil.rmtree(self.local_dir, ignore_errors=True)
-            return
-        if self.beam_id:
-            run_cmd(["tsh", "beams", "rm", self.beam_id], timeout=60)
+            gone = not (self.local_dir and os.path.exists(self.local_dir))
+            self.teardown_status = "removed" if gone else f"NOT removed: delete {self.local_dir}"
+            return gone
+        if not self.beam_id:
+            return not self.unaccounted
+        try:
+            r = run_cmd(["tsh", "beams", "rm", self.beam_id], timeout=60)
+            rm_error = None if r.returncode == 0 else (r.stderr or r.stdout).strip()[:200]
+        except subprocess.TimeoutExpired:
+            rm_error = "tsh beams rm timed out"
+        remaining = list_beam_ids()
+        if rm_error:
+            self.teardown_status = f"NOT removed ({rm_error}). Run: tsh beams rm {self.beam_id}"
+            return False
+        # Deletion can take a few seconds to show in `tsh beams ls`.
+        deadline = time.time() + TEARDOWN_CONFIRM_SECONDS
+        while remaining is not None and self.beam_id in remaining and time.time() < deadline:
+            time.sleep(3)
+            remaining = list_beam_ids()
+        if remaining is None:
+            self.teardown_status = (f"rm succeeded but couldn't confirm with tsh beams ls. "
+                                    f"Check: tsh beams ls")
+            return False
+        if self.beam_id in remaining:
+            self.teardown_status = f"NOT removed (still listed). Run: tsh beams rm {self.beam_id}"
+            return False
+        self.teardown_status = "removed (confirmed: no longer in tsh beams ls)"
+        return True
 
 
 def sha256(path):
@@ -216,8 +317,16 @@ def run_claude(worker, prompt_text, timeout=240):
     os.unlink(tmp.name)
     if FAKE_AGENT or (LOCAL and not shutil.which("claude")):
         return None   # caller falls back to a canned response for dry runs
+    if LOCAL:
+        # Practice mode runs Claude on THIS machine (useful inside a build Beam,
+        # see CUSTOMIZING.md), so never bypass permissions here: Claude may only
+        # read files, from the run's temp folder.
+        flags = '--allowedTools "Read,Glob,Grep" --disallowedTools "Bash,Edit,Write,WebFetch,WebSearch"'
+    else:
+        # Inside a disposable worker Beam, which is the sandbox.
+        flags = "--permission-mode bypassPermissions"
     return worker.sh(
-        f'cd {worker.path("")} && claude -p "$(cat prompt.txt)" --permission-mode bypassPermissions',
+        f'cd {worker.path("")} && claude -p "$(cat prompt.txt)" {flags}',
         timeout=timeout,
     ).strip()
 
@@ -232,50 +341,205 @@ BASIC_PATTERNS = [
     ("email address", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")),
     ("long raw digit sequence (9+ digits)", re.compile(r"\b\d{9,}\b")),
 ]
+PEOPLE_NOUNS = (
+    r"people|persons?|individuals?|employees?|staff(?:ers?)?|members?|folks?|"
+    r"workers?|colleagues?|managers?|leaders?|directors?|execs?|executives?|"
+    r"engineers?|developers?|designers?|reps?|representatives?|analysts?|"
+    r"hires?|joiners?|leavers?|departures?|starters?|"
+    r"men|women|man|woman|ICs?|reports?|performers?|"
+    r"heads?|seniors?|juniors?|interns?|contractors?|"
+    r"(?:\w+ )?(?:who|that) (?:left|quit|resigned|joined)"
+)
+SMALL_NUMBER = r"(?:[1-4]|one|two|three|four|a couple(?: of)?|a few|a handful(?: of)?|a pair of|both)"
 STRICT_PATTERNS = [
     ("currency amount", re.compile(r"\$\s?\d[\d,]*(\.\d+)?\s?[kKmM]?|\b\d{1,3}(,\d{3})+(\.\d+)?\b|\b\d{5,7}(\.\d+)?\b|\b\d+(\.\d+)?\s?[kK]\b|\bUSD\b")),
     ("employee or manager code", re.compile(r"\b[0-9a-f]{10}\b")),
-    ("reference to a very small group",
-     re.compile(r"\b(only one|the only|a single|sole|one person|[1-4] (people|person|employees?|managers?|reps?))\b", re.I)),
+    ("reference to a very small group", re.compile(
+        r"\b(only one|the only|a single|sole|one person|nobody else|no one else|just one)\b"
+        rf"|(?<![\d.,])\b{SMALL_NUMBER}\s+(?:\w+[- ]){{0,2}}?(?:{PEOPLE_NOUNS})\b",
+        re.I)),
 ]
 
-# Phrases that describe a metric's DEFINITION, not a group of people.
-# Example: M2 is literally "managers with 1 or 2 direct reports".
-# These are removed before the small-group check runs.
+# Phrases that describe a metric's DEFINITION or a rate, not a group of people.
+# Example: M2 is literally "managers with 1 or 2 direct reports", and
+# "1 in 4 employees" is a share. These are removed before the small-group
+# check runs.
 ALLOWED_PHRASES = re.compile(
     r"\b(1|one)\s*(-|–|or|to)\s*(2|two)\s+(direct\s+)?reports?\b"
     r"|\b(1|one)\s*(-|–|or|to)\s*(2|two)[- ]person teams?\b"
-    r"|\bvery small teams?\b",
+    r"|\bvery small teams?\b"
+    r"|\b(1|one|2|two|3|three|4|four)\s+(in|of|out of)\s+(every\s+)?(\d+|two|three|four|five|six|seven|eight|nine|ten)\b",
     re.I,
 )
 
 
-def gate_text(text, strict):
-    """Returns a list of reasons, each with the phrase that triggered it."""
+def gate_hits(text, strict):
+    """Returns (pattern name, matched phrase) pairs. The matched phrase may be
+    the sensitive value itself, so it must only go back to the agent inside the
+    beam, never to the browser, the receipt or a released file."""
     text = text or ""
     patterns = BASIC_PATTERNS + (STRICT_PATTERNS if strict else [])
-    reasons = []
+    hits = []
     for name, p in patterns:
         checked = ALLOWED_PHRASES.sub(" ", text) if name == "reference to a very small group" else text
         m = p.search(checked)
         if m:
-            reasons.append(f'{name} ("{m.group(0).strip()[:40]}")')
-    return reasons
+            hits.append((name, m.group(0).strip()[:40]))
+    return hits
 
 
-def gate_dashboard(metrics, insights):
-    """Structural checks on the numbers plus text checks on the insights."""
+def gate_text(text, strict):
+    """Reasons safe to show outside the beam: pattern names only."""
+    return [name for name, _ in gate_hits(text, strict)]
+
+
+# The only things the dashboard may contain. Anything else the agent or the
+# metrics file adds is dropped before the gate runs, so nothing unchecked is
+# rendered or written.
+ORGS = ["Engineering", "Product", "Sales", "Marketing", "G&A"]
+METRIC_IDS = ["R1", "R2", "R3", "R4", "M1", "M2", "M3", "P1", "P2", "P3", "C1", "C2", "C3", "C4"]
+METRIC_STATUSES = {"green", "yellow", "red", "suppressed"}
+INSIGHT_TEXT_KEYS = ("what", "why", "next_step")
+MAX_INSIGHTS = 3
+
+
+def _number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def clean_metrics(raw):
+    """Rebuild metrics.json from known orgs, metric IDs and keys. Returns
+    (metrics, reasons)."""
     reasons = []
-    for org, block in metrics["orgs"].items():
-        for mid, m in block.items():
-            if isinstance(m, dict) and m.get("value") is not None and m.get("n", 0) < MIN_GROUP:
-                reasons.append(f"{mid} for {org} is based on {m['n']} people (minimum {MIN_GROUP})")
-    for org, items in insights.items():
-        for item in items:
-            text = " ".join(str(item.get(k, "")) for k in ("what", "why", "next_step"))
-            for r in gate_text(text, strict=True):
-                reasons.append(f"{org} insight contains a {r}")
+    if not isinstance(raw, dict):
+        return None, ["metrics file is not a JSON object"]
+
+    def block(src, where, with_headcount):
+        src = src if isinstance(src, dict) else {}
+        out = {}
+        if with_headcount:
+            hc = src.get("headcount")
+            if not _number(hc):
+                reasons.append(f"{where}: headcount missing or not a number")
+                hc = 0
+            elif 0 < hc < MIN_GROUP:
+                reasons.append(f"{where}: headcount under {MIN_GROUP}")
+            out["headcount"] = hc
+        for mid in METRIC_IDS:
+            m = src.get(mid)
+            if not isinstance(m, dict):
+                reasons.append(f"{where} {mid}: missing")
+                continue
+            value, n, status = m.get("value"), m.get("n"), m.get("status")
+            clean = {
+                "label": str(m.get("label", "")),
+                "value": value if _number(value) else None,
+                "n": n if _number(n) else None,
+                "unit": str(m.get("unit", "")),
+                "status": status if status in METRIC_STATUSES else "suppressed",
+            }
+            if clean["value"] is None:
+                clean["status"], clean["n"] = "suppressed", None
+            elif clean["status"] == "suppressed":
+                clean["value"], clean["n"] = None, None
+            elif clean["n"] is None or clean["n"] < MIN_GROUP:
+                reasons.append(f"{where} {mid}: based on fewer than {MIN_GROUP} people")
+            for k in ("label", "unit"):
+                for name in gate_text(clean[k], strict=True):
+                    reasons.append(f"{where} {mid} {k}: {name}")
+            out[mid] = clean
+        return out
+
+    ref = raw.get("reference_date")
+    ref = ref if isinstance(ref, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", ref) else "unknown"
+    metrics = {
+        "reference_date": ref,
+        "min_group": MIN_GROUP,
+        "company": block(raw.get("company"), "company", with_headcount=False),
+        "orgs": {org: block((raw.get("orgs") or {}).get(org), org, with_headcount=True) for org in ORGS},
+    }
+    reasons += subtraction_check(metrics)
+    return metrics, reasons
+
+
+# Measures whose n adds up across orgs (people or managers), and the subset
+# that are plain "count / n" rates, so their counts add up too.
+ADDITIVE_N = ["R1", "R2", "R3", "R4", "M1", "M2", "M3", "P2", "P3", "C1", "C2", "C4"]
+PLAIN_RATES = ["R2", "R3", "R4", "M2", "M3", "P3", "C2", "C4"]
+
+
+def subtraction_check(metrics):
+    """Try the subtraction attack on what's about to be released: company
+    figure minus the visible orgs. If that reveals a hidden group of 1 to
+    MIN_GROUP-1 people (or a count or remainder that small), block.
+    compute_metrics.py already prevents this; this catches an out-of-date
+    worker image or a changed script."""
+    reasons = []
+    small = lambda c: 0 < c < MIN_GROUP  # noqa: E731
+    for mid in ADDITIVE_N:
+        co = metrics["company"].get(mid)
+        if not co or co["value"] is None:
+            continue
+        orgs = [metrics["orgs"][o][mid] for o in ORGS]
+        if all(m["value"] is not None for m in orgs):
+            continue
+        visible = [m for m in orgs if m["value"] is not None]
+        if co["n"] is None or any(m["n"] is None for m in visible):
+            continue   # already blocked by the n check in clean_metrics
+        hidden_n = co["n"] - sum(m["n"] for m in visible)
+        bad = small(hidden_n)
+        if not bad and mid in PLAIN_RATES:
+            hidden_num = round(co["value"] * co["n"] / 100) - sum(round(m["value"] * m["n"] / 100) for m in visible)
+            bad = small(hidden_num) or small(hidden_n - hidden_num)
+        if bad:
+            reasons.append(f"company {mid}: with the org figures, reveals a suppressed group under {MIN_GROUP}")
     return reasons
+
+
+def clean_insights(raw, metrics):
+    """Rebuild the insights from known orgs and keys only, and gate every
+    string in the result. Returns (insights, reasons, hits). `reasons` hold
+    pattern names only (safe for the browser); `hits` add the matched phrase
+    for the retry prompt, which stays inside the beam."""
+    insights, reasons, hits = {}, [], []
+    if not isinstance(raw, dict):
+        raw = {}
+    for org in ORGS:
+        items = raw.get(org)
+        if not isinstance(items, list) or not items:
+            reasons.append(f"{org}: no insights returned")
+            hits.append(f"{org}: no insights returned")
+            insights[org] = []
+            continue
+        clean_items = []
+        for idx, item in enumerate(items[:MAX_INSIGHTS], 1):
+            where = f"{org} insight {idx}"
+            if not isinstance(item, dict):
+                reasons.append(f"{where}: not an object")
+                hits.append(f"{where}: not an object")
+                continue
+            mid = item.get("metric", "-")
+            if mid not in METRIC_IDS and mid != "-":
+                reasons.append(f"{where}: unknown metric ID")
+                hits.append(f"{where}: metric must be one of {', '.join(METRIC_IDS)} or \"-\"")
+                continue
+            if mid != "-" and metrics["orgs"][org][mid]["status"] == "suppressed":
+                reasons.append(f"{where}: refers to a suppressed metric")
+                hits.append(f"{where}: {mid} is suppressed for {org}; don't mention it")
+            clean = {"metric": mid}
+            for k in INSIGHT_TEXT_KEYS:
+                v = item.get(k, "")
+                if not isinstance(v, str):
+                    reasons.append(f"{where} {k}: not text")
+                    hits.append(f"{where} {k}: must be a string")
+                    v = ""
+                for name, phrase in gate_hits(v, strict=True):
+                    reasons.append(f"{where} {k}: {name}")
+                    hits.append(f'{where} {k}: {name} ("{phrase}")')
+                clean[k] = v
+            clean_items.append(clean)
+        insights[org] = clean_items
+    return insights, reasons, hits
 
 
 # --------------------------------------------------------------------------
@@ -372,7 +636,9 @@ def render_dashboard(metrics, insights):
     return (
         "<div class='dash'><p class='meta'>Reference date "
         f"{html.escape(metrics['reference_date'])}. Any number based on fewer than "
-        f"{metrics['min_group']} people is suppressed.</p>{''.join(cards)}</div>"
+        f"{metrics['min_group']} people is suppressed. A company figure is hidden "
+        "when, together with the org figures, it would reveal a suppressed number.</p>"
+        f"{''.join(cards)}</div>"
     )
 
 
@@ -394,7 +660,7 @@ def pull_from_database(worker):
     and save it as people_coded.csv in the beam. The rows never touch the
     machine running this app."""
     script = (
-        f"cd {worker.path('')} && "
+        f"mkdir -p {REMOTE_DIR} && cd {worker.path('')} && "
         f"tsh db connect {shlex.quote(DB_NAME_TELEPORT)} "
         f"--db-user={shlex.quote(DB_USER)} --db-name={shlex.quote(DB_DATABASE)} <<'SQL'\n"
         f"\\copy (SELECT * FROM {DB_VIEW}) TO 'people_coded.csv' WITH CSV HEADER\n"
@@ -444,7 +710,8 @@ def use_phase_toolkit(worker, emit):
 
 
 def playbook_flow(worker, dataset, emit):
-    if DATA_SOURCE == "database" and not LOCAL:
+    from_database = DATA_SOURCE == "database" and not LOCAL
+    if from_database:
         emit("status", f"Pulling the no-names view from {DB_NAME_TELEPORT} through Teleport, inside the beam...")
         pull_from_database(worker)
     else:
@@ -459,31 +726,46 @@ def playbook_flow(worker, dataset, emit):
         worker.put(os.path.join(WORKER_DIR, "compute_metrics.py"), "compute_metrics.py")
 
     emit("status", "Computing org-level metrics inside the beam (raw rows stay in the beam)...")
-    worker.sh(f"cd {worker.path('')} && python3 compute_metrics.py people_coded.csv metrics.json", timeout=60)
-    run_dir = os.path.join(REPORTS_DIR, uuid.uuid4().hex[:8])
-    os.makedirs(run_dir)
-    metrics_path = os.path.join(run_dir, "metrics.json")
-    worker.get("metrics.json", metrics_path)
-    metrics = json.load(open(metrics_path))
+    ref = reference_date(from_database)
+    worker.sh(f"cd {worker.path('')} && python3 compute_metrics.py people_coded.csv metrics.json {ref}", timeout=60)
+    with tempfile.TemporaryDirectory() as tmp:
+        worker.get("metrics.json", os.path.join(tmp, "metrics.json"))
+        with open(os.path.join(tmp, "metrics.json")) as f:
+            metrics, reasons = clean_metrics(json.load(f))
+    if reasons:
+        emit("blocked", reasons)
+        raise RuntimeError("privacy gate blocked the metrics; nothing was released")
 
     feedback, insights, reasons = "", None, []
     for attempt in (1, 2, 3):
         emit("status", f"Claude is writing insights inside the beam (attempt {attempt})...")
         prompt = INSIGHT_PROMPT.format(min_group=MIN_GROUP, feedback=feedback)
         raw = run_claude(worker, prompt)
-        insights = canned_insights(metrics) if raw is None else parse_json(raw)
+        try:
+            raw_insights = canned_insights(metrics) if raw is None else parse_json(raw)
+        except ValueError:   # includes json.JSONDecodeError
+            raw_insights = None
         emit("status", "Privacy gate: checking group sizes, codes and dollar amounts...")
-        reasons = gate_dashboard(metrics, insights)
+        if raw_insights is None:
+            reasons, hits = ["agent did not return valid JSON"], ["your answer was not valid JSON"]
+        else:
+            insights, reasons, hits = clean_insights(raw_insights, metrics)
         if not reasons:
             break
         emit("blocked", reasons)
+        # The matched phrases go only into the prompt, which stays in the beam.
         feedback = ("\nYour previous answer was REJECTED by the privacy gate. The exact "
-                    "phrases that triggered it are in quotes: " + "; ".join(reasons)
+                    "phrases that triggered it are in quotes: " + "; ".join(hits)
                     + ". Rewrite those insights without that kind of phrase "
                     "(use rates or shares instead) and return the full JSON again.")
     if reasons:
         raise RuntimeError("privacy gate blocked the report 3 times; nothing was released")
 
+    # Only gated, rebuilt objects are written; the run folder exists only once
+    # everything has passed.
+    run_dir = new_run_dir()
+    with open(os.path.join(run_dir, "metrics.json"), "w") as f:
+        json.dump(metrics, f, indent=2)
     with open(os.path.join(run_dir, "insights.json"), "w") as f:
         json.dump(insights, f, indent=2)
     dash = render_dashboard(metrics, insights)
@@ -508,8 +790,7 @@ def freeform_flow(worker, dataset, emit):
     if reasons:
         emit("blocked", reasons)
         raise RuntimeError("privacy gate blocked the report; nothing was released")
-    run_dir = os.path.join(REPORTS_DIR, uuid.uuid4().hex[:8])
-    os.makedirs(run_dir)
+    run_dir = new_run_dir()
     with open(os.path.join(run_dir, "report.md"), "w") as f:
         f.write(raw)
     emit("report", raw)
@@ -585,97 +866,128 @@ def index():
     return HTML.replace("__DASH_CSS__", DASH_CSS).replace("__MODE__", mode)
 
 
+def sse(kind, **payload):
+    return f"data: {json.dumps({'type': kind, **payload})}\n\n"
+
+
+def run_job(dataset, send):
+    """One full run: provision, flow, teardown, receipt. Runs in its own thread
+    so it always finishes (and always tears the beam down), even if the
+    browser disconnects. `send(kind, **payload)` queues an event for the page."""
+
+    def emit(kind, value):
+        if kind == "blocked_warning":
+            send("warning", msg=value)
+        elif kind == "blocked":
+            send("blocked", reasons=value)
+        elif kind == "dashboard":
+            send("dashboard", html=value)
+        elif kind == "report":
+            send("report", content=value)
+        else:
+            send("status", msg=value)
+
+    worker = Worker()
+    started = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    released, outcome = [], "failed"
+    try:
+        send("status", msg="Provisioning a fresh disposable worker beam...")
+        beam_id = worker.provision()
+        send("status", msg=f"Beam {beam_id} is up. Waiting for it to be ready...")
+        worker.wait_ready()
+        flow = playbook_flow if dataset["mode"] == "playbook" else freeform_flow
+        run_dir = flow(worker, dataset, emit)
+        released = sorted(os.listdir(run_dir))
+        outcome = "released"
+        rid = os.path.basename(run_dir)
+        send("files", links=[[f"/download/{rid}/{f}", f] for f in released])
+    except Exception as exc:
+        if "privacy gate" in str(exc):
+            outcome = "blocked by privacy gate, nothing released"
+        send("error", msg=str(exc))
+    finally:
+        gone = worker.teardown()
+        if worker.beam_id and gone:
+            send("status", msg=f"Beam {worker.beam_id} torn down and confirmed gone. "
+                               "Raw data, credential and VM are gone.")
+        elif worker.beam_id:
+            send("error", msg=f"Beam {worker.beam_id} was NOT confirmed removed: {worker.teardown_status}")
+        if worker.unaccounted:
+            send("error", msg="A beam may have been created that this app couldn't identify: "
+                              + ", ".join(worker.unaccounted) + ". Check `tsh beams ls` and remove it.")
+        receipt = [
+            "RUN RECEIPT",
+            f"  beam:        {worker.beam_id or '-'}",
+            f"  image:       {worker.image}",
+            f"  started:     {started}",
+            f"  teardown:    {worker.teardown_status}",
+        ]
+        if gone and worker.beam_id:
+            receipt.append(f"  destroyed:   {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}")
+        if worker.unaccounted:
+            receipt.append("  CHECK:       possible leftover beam(s): " + ", ".join(worker.unaccounted))
+        receipt += [
+            f"  copied in:   " + (", ".join(f"{k} (sha256 {v})" for k, v in worker.copied_in.items()) or "-"),
+            f"  released:    " + (", ".join(released) or "nothing"),
+            f"  outcome:     {outcome}",
+            "  query audit: see the Teleport audit log for this beam's session",
+        ]
+        text = "\n".join(receipt)
+        print(text, flush=True)   # kept in the console even if the browser has gone
+        send("receipt", text=text)
+
+
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    key = request.json.get("dataset")
+    key = (request.get_json(silent=True) or {}).get("dataset")
     dataset = DATASETS.get(key)
+    if not dataset:
+        return Response(sse("error", msg=f"Unknown dataset: {key}"), mimetype="text/event-stream")
 
-    def sse(kind, **payload):
-        return f"data: {json.dumps({'type': kind, **payload})}\n\n"
+    events = queue.Queue()
+    DONE = object()
+
+    def job():
+        try:
+            run_job(dataset, lambda kind, **payload: events.put(sse(kind, **payload)))
+        finally:
+            events.put(DONE)
+
+    threading.Thread(target=job, daemon=False).start()
 
     def generate():
-        if not dataset:
-            yield sse("error", msg=f"Unknown dataset: {key}")
-            return
-        events = []
+        # Only streams events. If the browser disconnects, this generator is
+        # closed, but the job thread keeps going and still tears down the beam.
+        while True:
+            event = events.get()
+            if event is DONE:
+                return
+            yield event
 
-        def emit(kind, value):
-            if kind == "blocked_warning":
-                events.append(sse("warning", msg=value))
-            elif kind == "blocked":
-                events.append(sse("blocked", reasons=value))
-            elif kind == "dashboard":
-                events.append(sse("dashboard", html=value))
-            elif kind == "report":
-                events.append(sse("report", content=value))
-            else:
-                events.append(sse("status", msg=value))
+    return Response(generate(), mimetype="text/event-stream")
 
-        worker = Worker()
-        started = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-        run_dir, released, outcome = None, [], "failed"
-        try:
-            yield sse("status", msg="Provisioning a fresh disposable worker beam...")
-            beam_id = worker.provision()
-            yield sse("status", msg=f"Beam {beam_id} is up. Waiting for it to be ready...")
-            worker.wait_ready()
-            flow = playbook_flow if dataset["mode"] == "playbook" else freeform_flow
-            # run the flow, streaming its events as they happen
-            import threading
-            result = {}
 
-            def target():
-                try:
-                    result["value"] = flow(worker, dataset, emit)
-                except Exception as exc:  # surfaced below
-                    result["error"] = exc
-
-            t = threading.Thread(target=target)
-            t.start()
-            while t.is_alive() or events:
-                while events:
-                    yield events.pop(0)
-                time.sleep(0.2)
-            if "error" in result:
-                raise result["error"]
-            run_dir = result["value"]
-            released = sorted(os.listdir(run_dir))
-            outcome = "released"
-            rid = os.path.basename(run_dir)
-            yield sse("files", links=[[f"/download/{rid}/{f}", f] for f in released])
-        except Exception as exc:
-            if "privacy gate" in str(exc):
-                outcome = "blocked by privacy gate, nothing released"
-            yield sse("error", msg=str(exc))
-        finally:
-            worker.teardown()
-            if worker.beam_id:
-                yield sse("status", msg=f"Beam {worker.beam_id} torn down. Raw data, credential and VM are gone.")
-            receipt = [
-                "RUN RECEIPT",
-                f"  beam:        {worker.beam_id}",
-                f"  image:       {worker.image}",
-                f"  started:     {started}",
-                f"  destroyed:   {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
-                f"  copied in:   " + (", ".join(f"{k} (sha256 {v})" for k, v in worker.copied_in.items()) or "-"),
-                f"  released:    " + (", ".join(released) or "nothing"),
-                f"  outcome:     {outcome}",
-                "  query audit: see the Teleport audit log for this beam's session",
-            ]
-            yield sse("receipt", text="\n".join(receipt))
-
-    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+RUN_ID = re.compile(r"[0-9a-f]{8}")
+RELEASED_FILES = {"metrics.json", "insights.json", "dashboard.html", "report.md"}
 
 
 @app.route("/download/<run_id>/<filename>")
 def download(run_id, filename):
+    # Only the 8-hex-character run IDs new_run_dir() makes, and only the file
+    # names a run releases. Anything else is a 404, so no path can escape
+    # reports/.
+    if not RUN_ID.fullmatch(run_id) or filename not in RELEASED_FILES:
+        abort(404)
     return send_from_directory(os.path.join(REPORTS_DIR, run_id), filename, as_attachment=True)
 
 
 if __name__ == "__main__":
-    print("Clean Room running on http://localhost:8080" + (" (LOCAL DRY RUN)" if LOCAL else ""))
+    print(f"Clean Room running on http://{HOST}:{PORT}" + (" (LOCAL DRY RUN)" if LOCAL else ""))
+    if HOST not in ("127.0.0.1", "localhost", "::1"):
+        print(f"WARNING: listening on {HOST} with no authentication. Anyone who can reach "
+              "this address can start runs and download reports.")
     if PHASE and not LOCAL:
         print(f"Worker beams start from the {PHASE} image (Phase). Rebuild after editing worker/: tsh phase apply -f phase.yaml")
     if BEAM_ALIAS:
         print(f"To publish externally: tsh beams publish {BEAM_ALIAS}")
-    app.run(host="0.0.0.0", port=8080, threaded=True)
+    app.run(host=HOST, port=PORT, threaded=True)
