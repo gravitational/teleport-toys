@@ -1,0 +1,17 @@
+# Teleport role for the Clean Room worker beam.
+# Lets a beam read the hr_demo database ONLY as the read-only Postgres user,
+# which can only SELECT from the no-names view v_people_coded.
+# Change the label below to match the labels on YOUR enrolled database
+# (see the Labels column of `tsh db ls`).
+version: v8
+kind: role
+metadata:
+  name: clean-room-reader
+spec:
+  allow:
+    db_labels:
+      env: dummy-hr
+    db_users:
+      - readonly_analyst
+    db_names:
+      - hr_demo
