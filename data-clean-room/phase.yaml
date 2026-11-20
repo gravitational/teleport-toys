@@ -1,0 +1,19 @@
+# Clean Room worker image (a Teleport Beams Phase).
+#
+# Bakes the worker toolkit (worker/playbook.md and worker/compute_metrics.py)
+# into a reusable image, so each run only brings in data.
+#
+# NEVER add data to this file. A Phase outlives every Beam; data must arrive
+# fresh in each run and be destroyed with its Beam.
+#
+# Build or rebuild (after any change in worker/):
+#   chmod -R a+rX worker      # files must be readable by the Beam's user
+#   tsh phase apply -f phase.yaml
+#   tsh phase ls          # wait for clean-room-worker to show "ready"
+version: v1
+metadata:
+  name: clean-room-worker
+files:
+  - comment: Clean Room worker toolkit (metrics script and playbook)
+    from: ./worker
+    to: /opt/clean-room
