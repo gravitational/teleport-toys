@@ -10,11 +10,11 @@ One click in the web app (`app.py`):
 
 1. **Creates a fresh worker Beam** from the `clean-room-worker` image, with only the Teleport roles you choose. The image is a Teleport [Phase](https://goteleport.com/docs/beams/#building-reusable-images-with-phases) with the metrics script and playbook built in, and no data.
 2. **Brings the data in:** copies a sample CSV into the Beam, or pulls a no-names view from your database through Teleport ([CONNECT_DATABASE.md](CONNECT_DATABASE.md)). Data arrives fresh in every run and never goes into the image.
-3. **Computes 14 org-health measures inside the Beam** (`worker/compute_metrics.py`). Any number that describes fewer than 5 people is suppressed: a small population, a small count within it (such as 1 leaver), or a small remainder. A company figure is also hidden when subtracting the visible orgs from it would reveal a suppressed one. Raw rows never leave.
+3. **Computes 14 org-health measures inside the Beam** (`worker/compute_metrics.py`). Any number that describes fewer than 5 people is suppressed: a small population, a small count within it (such as 1 leaver), or a small remainder. Every population size is treated as if it could be worked out from the released numbers, so a measure is also hidden when the difference between two nested groups is 1 to 4 people (for example, leavers minus voluntary leavers for R1, or top performers hired in the last 2 years for R4). A company figure is also hidden when subtracting the visible orgs from it would reveal a suppressed one. The gate repeats the company, P1 and C2/R4 checks, but the other nested-group checks run only here, so the app refuses to run an out-of-date image. Raw rows never leave.
 4. **Runs Claude inside the Beam** to write up to 3 insights per org, following `worker/playbook.md`.
-5. **Checks everything before release.** The app rebuilds the metrics and insights from known orgs, measures and fields only, then the privacy gate checks every string it will show or save. It blocks employee and manager codes, dollar amounts, numbers based on fewer than 5 people, small-group phrases ("the only one," "two engineers"), and SSN, bank and email patterns. It does **not** detect names: keeping names out is the job of the no-names view. Blocked output goes back to Claude inside the Beam with the triggering phrase quoted, up to 3 tries; the browser only sees which rule fired, never the blocked text.
-6. **Shows a red/yellow/green dashboard** per org, with suppressed numbers marked "Suppressed (<5)."
-7. **Deletes the Beam**, even if something failed or the browser was closed, checks with `tsh beams ls` that it is gone, and prints a **run receipt**: Beam ID, the image it used, whether teardown was confirmed, what went in (with a fingerprint), what came out, and the outcome. If teardown can't be confirmed, the receipt says so and gives the command to remove the Beam.
+5. **Checks everything before release.** The app rebuilds the metrics and insights from known orgs, measures and fields only, then the privacy gate checks every string it will show or save. It blocks employee and manager codes, dollar amounts, numbers based on fewer than 5 people, small-group phrases ("the only one," "two engineers," "Two of them left," "2/9"), and SSN, bank and email patterns. It does **not** detect names: keeping names out is the job of the no-names view. Blocked output goes back to Claude inside the Beam with the triggering phrase quoted, up to 3 tries; the browser only sees which rule fired, never the blocked text. An error message that matches a privacy rule is replaced in the browser with a generic message naming the failed step.
+6. **Shows a red/yellow/green dashboard** per org, with suppressed numbers marked "Suppressed (<5)." The released `metrics.json` and the dashboard show each org's headcount but no population sizes (`n`), because differences between the measures' `n` values can reveal small groups.
+7. **Deletes the Beam**, even if something failed or the browser was closed, checks with `tsh beams ls --all` that it is gone, and prints a **run receipt**: Beam ID, the image it used, whether teardown was confirmed, what went in (with a fingerprint), what came out, and the outcome. If teardown can't be confirmed, the receipt says so and gives the command to remove the Beam. A failed or unreadable `tsh beams add` never deletes anything. Any new Beams it may have created are listed on the receipt as possible leftovers to check by hand.
 
 ![Architecture](assets/architecture.png)
 
@@ -73,7 +73,7 @@ tsh phase apply -f phase.yaml
 tsh phase ls
 ```
 
-Wait for `clean-room-worker` to show **ready**. Rebuild it the same way whenever you change anything in `worker/`. If you forget, the app warns you at the start of each run that the image is out of date.
+Wait for `clean-room-worker` to show **ready**. Rebuild it the same way whenever you change anything in `worker/`. If you forget, the app stops the run at the start, computes and releases nothing, and tells you to rebuild with `tsh phase apply -f phase.yaml`.
 
 ![tsh phase ls showing the clean-room-worker image ready](assets/phase-ready.png)
 
@@ -106,7 +106,7 @@ Then open http://localhost:8080. Each run creates a Beam from the image and dele
 | `CLEAN_ROOM_DB`, `CLEAN_ROOM_DB_USER`, `CLEAN_ROOM_DB_NAME`, `CLEAN_ROOM_DB_VIEW` | see guide | Database settings for `database` mode |
 | `CLEAN_ROOM_REFERENCE_DATE` | latest quarter start (database), `2026-10-01` (sample CSV) | Date the "last 12 months" measures count back from, `YYYY-MM-DD`. Must be the first day of a quarter (`01-01`, `04-01`, `07-01` or `10-01`). Anything dated after it is ignored. See [CUSTOMIZING.md](CUSTOMIZING.md). |
 | `CLEAN_ROOM_HOST`, `CLEAN_ROOM_PORT` | `127.0.0.1`, `8080` | Where the web UI listens. Only use `0.0.0.0` on a network you control. |
-| `CLEAN_ROOM_LOCAL=1` | off | Simulate worker Beams locally. If `claude` is on your PATH and `CLEAN_ROOM_FAKE_AGENT` is off, Claude runs on this machine with only Read, Glob and Grep and no MCP servers. It can't write files or run commands, but it can read any file your user can. |
+| `CLEAN_ROOM_LOCAL=1` | off | Simulate worker Beams locally. If `claude` is on your PATH and `CLEAN_ROOM_FAKE_AGENT` is off, Claude runs on this machine with only Read, Glob and Grep, no MCP servers, and `--restricted`, which confines those tools to the run folder and ignores your Claude Code settings. It can't write files, run commands or read outside the run folder. A Claude Code version too old for `--restricted` makes the run fail. |
 | `CLEAN_ROOM_FAKE_AGENT=1` | off | Skip Claude and use placeholder insights |
 
 ## Customizing it
@@ -128,6 +128,8 @@ Then open http://localhost:8080. Each run creates a Beam from the image and dele
 
 - **Claude's output format:** the app asks Claude for JSON and reads the first `{...}` block. Unexpected output fails the run rather than releasing anything.
 - **Comparing runs:** the reference date must be a quarter start, so two runs can't be a day apart. Runs on adjacent quarters can still be compared. If only a few people joined, left or were promoted in an org during a quarter, the difference between the two dashboards may say something about them. Release one dashboard per quarter, and limit who can run the app.
+- **Re-running a quarter:** in database mode, running the same quarter again after the data changes (back-dated leavers, re-ratings) can also single people out, because only dates are rolled back to the reference date. Release one dashboard per quarter, and limit who can run the app.
+- **The gate has limits:** its patterns catch mistakes, not an agent that deliberately evades them (look-alike letters, shortened codes). The no-names view and the Beam are the real controls.
 - **Timeouts:** each Claude attempt has a 4-minute limit.
 - **The worker image stays in the region where it was built.** Beams created from it run in that region.
 - **Database mode** follows the Beams documentation but hasn't yet been tested end to end. See [CONNECT_DATABASE.md](CONNECT_DATABASE.md).
@@ -155,13 +157,13 @@ The fictional data has problems planted in it, so you can check a run is working
 
 | Org | Red flags | Also visible | Suppressed (a group, count or remainder under 5 people) |
 |---|---|---|---|
-| Engineering | Regretted attrition (R2), high-performer stall (R4, ~72%), top performers paid low (C2) | Attrition on watch (R1) | C4 |
-| Product | Narrow spans (M1), very small teams (M2), manager churn (M3) | | R1, R2, P2, P3, C3 |
-| Sales | Attrition (R1), first-year attrition (R3), pay compression (C3) | | R2, R4, M3, C2 |
+| Engineering | Regretted attrition (R2), top performers paid low (C2) | | R1, R4, C4 |
+| Product | Narrow spans (M1), very small teams (M2), manager churn (M3) | | R1, R2, R4, P2, P3, C3 |
+| Sales | First-year attrition (R3), pay compression (C3) | | R1, R2, R4, M3, C2 |
 | Marketing | Rating inflation (P1), promotion rate (P2) | | R1, R2, R4, M3, P3, C3 |
-| G&A | None: the healthy comparison org | | R1, R2, M3, P3, C3 |
+| G&A | None: the healthy comparison org | | R1, R2, R4, M3, P3, C3 |
 
-In the Company column, R2, R4, P2, C2 and C4 are hidden, because with the org figures they would reveal a suppressed number.
+In the Company column, R2, P2, C2 and C4 are hidden, because with the org figures they would reveal a suppressed number.
 
 ## Further reading
 

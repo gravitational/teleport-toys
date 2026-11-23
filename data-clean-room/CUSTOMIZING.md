@@ -15,7 +15,7 @@ How to change what Clean Room measures and how it reports, and how to work on th
 | Rating scale (what counts as a top performer) | `TOP` in `worker/compute_metrics.py` | The scale in `worker/playbook.md`, section 3 |
 | Minimum group size | `MIN_GROUP` in `worker/compute_metrics.py` | `MIN_GROUP` in `app.py` (the privacy gate) |
 | Privacy gate rules | The pattern lists in `app.py` | Section 5 of `worker/playbook.md` |
-| Subtraction checks | `protect_company()` and `HEADCOUNT_N` in `worker/compute_metrics.py` | `subtraction_check()`, `ADDITIVE_N` and `HEADCOUNT_N` in `app.py`. If you add a measure, add it to these lists, and treat any measure that compares an org with the company (like P1) as all-or-nothing. |
+| Subtraction checks | `protect_company()` and `HEADCOUNT_N` in `worker/compute_metrics.py` | `subtraction_check()`, `ADDITIVE_N` and `HEADCOUNT_N` in `app.py`. If you add a measure, add it to these lists, list every group its value and `n` reveal in its `groups=` (see `metric()`), and treat any measure that compares an org with the company (like P1) as all-or-nothing: hidden for every org if the company figure or any org with people in it is hidden. |
 | Reference date | `CLEAN_ROOM_REFERENCE_DATE` (see below) | The quarter-start rule is in both `app.py` and `compute_metrics.py` |
 | Orgs and measure IDs the app will release | `ORGS` and `METRIC_IDS` in `app.py` | `ORGS` and `THRESHOLDS` in `worker/compute_metrics.py`. Anything not listed in `app.py` is dropped before release. |
 
@@ -33,9 +33,7 @@ tsh phase apply -f phase.yaml
 tsh phase ls
 ```
 
-The `chmod` makes sure the files are readable inside the Beam; the image keeps each file's permissions. If you forget, the app warns you at the start of each run that the image is out of date, and records it in the run receipt.
-
-![The app warning that the worker image is out of date](assets/phase-out-of-date.png)
+The `chmod` makes sure the files are readable inside the Beam; the image keeps each file's permissions. If you forget, the app stops the run at the start, computes and releases nothing, and tells you to rebuild with `tsh phase apply -f phase.yaml`.
 
 ---
 
@@ -69,7 +67,7 @@ pip install flask
 CLEAN_ROOM_LOCAL=1 python3 app.py
 ```
 
-Inside a Beam, practice mode uses the Beam's built-in Claude, so you see real insights on the sample data. In practice mode Claude runs on the same machine as the app, so it never gets `bypassPermissions`. It runs with `--tools Read,Glob,Grep --strict-mcp-config --permission-mode dontAsk`: those three are its only tools, no MCP servers load, and anything else is denied. It can't write files or run commands, but `Read` isn't limited to the run folder, so it can read any file the user running the app can. Use sample data only. To view the app, run `tsh beams publish <build-beam-name>` from your laptop and open the link it prints. If the link can't reach the app, start it with `CLEAN_ROOM_HOST=0.0.0.0`.
+Inside a Beam, practice mode uses the Beam's built-in Claude, so you see real insights on the sample data. In practice mode Claude runs on the same machine as the app, so it never gets `bypassPermissions`. It runs with `--tools Read,Glob,Grep --strict-mcp-config --permission-mode dontAsk`: those three are its only tools, no MCP servers load, and anything else is denied. It also runs with `--restricted`, which confines `Read`, `Glob` and `Grep` to the run folder and ignores the user's settings files. It can't write files, run commands or read outside the run folder. A Claude Code version too old for `--restricted` makes the run fail. Use sample data only. To view the app, run `tsh beams publish <build-beam-name>` from your laptop and open the link it prints. If the link can't reach the app, start it with `CLEAN_ROOM_HOST=0.0.0.0`.
 
 Edit `worker/playbook.md` or `worker/compute_metrics.py`, run again, and repeat.
 

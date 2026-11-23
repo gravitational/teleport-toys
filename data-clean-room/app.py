@@ -18,6 +18,7 @@ import hashlib
 import html
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -27,6 +28,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from datetime import date
 
@@ -92,6 +94,9 @@ if REFERENCE_DATE:
     if not is_quarter_start(_ref):
         raise SystemExit(f"CLEAN_ROOM_REFERENCE_DATE must be the first day of a quarter "
                          f"(01-01, 04-01, 07-01 or 10-01), got {REFERENCE_DATE!r}")
+    # Pass on YYYY-MM-DD only: "20261001" or "2026-W40-4" parse here, but older
+    # Pythons in the beam reject them.
+    REFERENCE_DATE = _ref.isoformat()
 
 
 def latest_quarter_start(today=None):
@@ -166,14 +171,19 @@ def run_cmd(args, timeout, input_text=None):
 
 
 def list_beam_ids():
-    """IDs from `tsh beams ls`, or None if the list can't be read."""
+    """IDs from `tsh beams ls --all`, or None if the list can't be read."""
     try:
-        r = run_cmd(["tsh", "beams", "ls", "-f", "json"], timeout=60)
+        # --all: inside a Beam, plain `ls` shows only that Beam identity's own beams.
+        r = run_cmd(["tsh", "beams", "ls", "--all", "-f", "json"], timeout=60)
         if r.returncode != 0:
             return None
         data = json.loads(r.stdout or "[]")
-        return {b.get("id") for b in data if isinstance(b, dict) and b.get("id")}
-    except (subprocess.TimeoutExpired, ValueError, OSError):
+        if data is None:
+            data = []      # tsh prints null when there are no beams
+        if not isinstance(data, list):
+            return None    # unknown shape: never "confirm" a beam gone from it
+        return {str(b.get("id")) for b in data if isinstance(b, dict) and b.get("id")}
+    except (subprocess.TimeoutExpired, ValueError, TypeError, OSError):
         return None
 
 
@@ -211,30 +221,36 @@ class Worker:
             # `add` may or may not have created a beam. Never guess which one
             # it was: other tools (VS Code, the Slack bot, a terminal, another
             # copy of this app) can add beams at the same time.
-            self.unaccounted = ["unknown (tsh beams add timed out; check tsh beams ls)"]
+            self.unaccounted = ["unknown (tsh beams add timed out; check tsh beams ls --all)"]
             raise RuntimeError("beam provisioning timed out")
-        if result.returncode != 0:
-            # A failed add is treated as "nothing created". Diffing the beam
-            # list here could pick up someone else's beam and delete it.
-            raise RuntimeError(f"beam provisioning failed: {result.stderr.strip()}")
-        try:
-            data = json.loads(result.stdout)
-            if isinstance(data, list):
-                data = data[0]
-            self.beam_id = data.get("id") or data.get("ID")
-        except (ValueError, IndexError, AttributeError):
-            pass
-        if self.beam_id:
-            return self.beam_id
-        # `add` succeeded but its output had no ID we could read. The list diff
-        # shows what may be ours, but a beam created elsewhere at the same time
-        # looks the same, so report the candidates instead of deleting any.
+        if result.returncode == 0:
+            try:
+                data = json.loads(result.stdout)
+                if isinstance(data, list):
+                    data = data[0]
+                beam_id = data.get("id") or data.get("ID")
+                self.beam_id = str(beam_id) if beam_id else None   # tsh may print a number
+            except (ValueError, IndexError, AttributeError):
+                pass
+            if self.beam_id:
+                return self.beam_id
+            error = f"could not find beam id in: {result.stdout.strip()[:200]}"
+        else:
+            error = f"beam provisioning failed: {result.stderr.strip()}"
+        # `add` failed (it may still have created a beam) or its output had no
+        # ID we could read. The list diff shows what may be ours, but a beam
+        # created elsewhere at the same time looks the same, so report the
+        # candidates instead of deleting any.
         after = list_beam_ids()
         if before is None or after is None:
             self.unaccounted = ["unknown (couldn't list beams to check)"]
+        elif after - before:
+            self.unaccounted = sorted(after - before)
+        elif result.returncode != 0:
+            self.teardown_status = "nothing removed: tsh beams add failed and no new beam appeared in tsh beams ls"
         else:
-            self.unaccounted = sorted(after - before) or ["unknown (no new beam in tsh beams ls)"]
-        raise RuntimeError(f"could not find beam id in: {result.stdout.strip()[:200]}")
+            self.unaccounted = ["unknown (no new beam in tsh beams ls)"]
+        raise RuntimeError(error)
 
     def wait_ready(self, max_wait=90, interval=3):
         if LOCAL:
@@ -259,7 +275,9 @@ class Worker:
             r = run_cmd(["tsh", "beams", "exec", self.beam_id, "--", "bash -c " + shlex.quote(script)],
                         timeout=timeout)
         if r.returncode != 0:
-            raise RuntimeError((r.stderr or r.stdout).strip())
+            err = RuntimeError((r.stderr or r.stdout).strip())
+            err.returncode = r.returncode
+            raise err
         return r.stdout
 
     def path(self, name):
@@ -294,6 +312,9 @@ class Worker:
             self.teardown_status = "removed" if gone else f"NOT removed: delete {self.local_dir}"
             return gone
         if not self.beam_id:
+            if self.unaccounted:
+                # Unknown whether a beam was created: don't say none was.
+                self.teardown_status = "nothing removed: couldn't tell which beam, if any, this run created (see CHECK)"
             return not self.unaccounted
         try:
             r = run_cmd(["tsh", "beams", "rm", self.beam_id], timeout=60)
@@ -311,7 +332,7 @@ class Worker:
             remaining = list_beam_ids()
         if remaining is None:
             self.teardown_status = (f"rm succeeded but couldn't confirm with tsh beams ls. "
-                                    f"Check: tsh beams ls")
+                                    f"Check: tsh beams ls --all")
             return False
         if self.beam_id in remaining:
             self.teardown_status = f"NOT removed (still listed). Run: tsh beams rm {self.beam_id}"
@@ -339,18 +360,23 @@ def run_claude(worker, prompt_text, timeout=240):
         # see CUSTOMIZING.md), so never bypass permissions here. --tools makes
         # Read, Glob and Grep the only built-in tools, --strict-mcp-config
         # drops MCP servers from the local config, and dontAsk denies anything
-        # else instead of prompting. Claude can't write files or run commands,
-        # but Read is NOT limited to the run folder: it can read any file this
-        # user can.
+        # else instead of prompting. --restricted confines Read, Glob and Grep
+        # to the run folder (the working directory), refuses bypassPermissions
+        # and ignores user, project and local settings files. Claude can't
+        # write files, run commands or read outside the run folder. A Claude
+        # Code too old to know --restricted exits with an error, so the run
+        # fails instead of running unconfined.
         flags = ('--tools "Read,Glob,Grep" --allowedTools "Read,Glob,Grep" '
-                 '--strict-mcp-config --permission-mode dontAsk')
+                 '--strict-mcp-config --permission-mode dontAsk --restricted')
     else:
         # Inside a disposable worker Beam, which is the sandbox.
         flags = "--permission-mode bypassPermissions"
-    return worker.sh(
-        f'cd {worker.path("")} && claude -p "$(cat prompt.txt)" {flags}',
-        timeout=timeout,
-    ).strip()
+    try:
+        out = worker.sh(f'cd {worker.path("")} && claude -p "$(cat prompt.txt)" {flags}', timeout=timeout)
+    except RuntimeError as exc:
+        # Claude's own words (stdout or stderr) never leave the beam.
+        raise RuntimeError(f"Claude failed inside the beam (exit {getattr(exc, 'returncode', '?')})") from None
+    return out.strip()
 
 
 # --------------------------------------------------------------------------
@@ -360,7 +386,11 @@ def run_claude(worker, prompt_text, timeout=240):
 BASIC_PATTERNS = [
     ("SSN-like pattern", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
     ("bank-account-like pattern", re.compile(r"\bXXXX-\d{3,}\b")),
-    ("email address", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")),
+    # Start only where a run of local-part characters starts, and cap each part
+    # at the lengths a real address allows (64 before the @, 63 per domain
+    # label). Without that, a long run like "a-a-a-..." is rescanned from every
+    # position: 28 s on 100,000 characters.
+    ("email address", re.compile(r"(?<![\w.+-])[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63})+")),
     ("long raw digit sequence (9+ digits)", re.compile(r"\b\d{9,}\b")),
 ]
 PEOPLE_NOUNS = (
@@ -368,20 +398,46 @@ PEOPLE_NOUNS = (
     r"workers?|colleagues?|managers?|leaders?|directors?|execs?|executives?|"
     r"engineers?|developers?|designers?|reps?|representatives?|analysts?|"
     r"hires?|joiners?|leavers?|departures?|starters?|"
+    r"resignations?|exits?|terminations?|promotions?|separations?|"
     r"men|women|man|woman|ICs?|reports?|performers?|"
     r"heads?|seniors?|juniors?|interns?|contractors?|"
     r"(?:\w+ )?(?:who|that) (?:left|quit|resigned|joined)"
 )
 SMALL_NUMBER = r"(?:[1-4]|one|two|three|four|a couple(?: of)?|a few|a handful(?: of)?|a pair of|both)"
+# Words that say people left, joined or were promoted, and the words that may
+# sit between a number and them ("3 have since resigned", "Two are leaving").
+LEAVE_FILLERS = r"(?:have|has|had|are|is|were|was|been|being|got|getting|recently|since|already)"
+LEAVE_VERBS = (r"(?:left|leaving|quit|quitting|resigned|resigning|departed|departing|joined|joining|retired|retiring"
+               r"|transferred|transferring|promoted|hired|fired|let\s+go|laid\s+off"
+               r"|terminated|exited|exiting|dismissed|moved\s+on)")
+LEAVER_NOUNS = r"(?:leavers?|departures?|resignations?|exits?|terminations?|promotions?|separations?)"
+# These patterns catch mistakes, not an agent that is deliberately evading
+# them: the no-names view and the Beam are the real controls.
 STRICT_PATTERNS = [
     ("currency amount", re.compile(r"\$\s?\d[\d,]*(\.\d+)?\s?[kKmM]?|\b\d{1,3}(,\d{3})+(\.\d+)?\b|\b\d{5,7}(\.\d+)?\b|\b\d+(\.\d+)?\s?[kK]\b|\bUSD\b")),
-    # Not \b: "_" is a word character, so \b misses "emp_56121ed67d".
-    ("employee or manager code", re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{10}(?![0-9A-Za-z])")),
+    # Not \b: "_" is a word character, so \b misses "emp_56121ed67d". Hex-only
+    # edges, so letters around the code ("emp56121ed67d") don't hide it, and
+    # {10,} so a hex character touching it ("a56121ed67d") doesn't either.
+    ("employee or manager code", re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{10,}(?![0-9a-fA-F])")),
     ("reference to a very small group", re.compile(
         r"\b(only one|the only|a single|sole|lone|solitary|one person|nobody else|no one else|just one)\b"
-        rf"|(?<![\d.,])\b{SMALL_NUMBER}\s+(?:\w+[- ]){{0,2}}?(?:{PEOPLE_NOUNS})\b"
+        # "both new hires and tenured engineers" is coordination, not a count,
+        # unless the words before "and" say someone left ("Both engineers quit and ...",
+        # "Both regretted leavers and ...").
+        rf"|(?<![\d.,])\b(?!both(?:\s+(?!(?:{LEAVE_FILLERS}|{LEAVE_VERBS}|{LEAVER_NOUNS})\b)[\w-]+){{1,3}}\s+and\b)"
+        rf"{SMALL_NUMBER}\s+(?:\w+[- ]){{0,2}}?(?:{PEOPLE_NOUNS})\b"
+        rf"|\banother\s+(?:\w+[- ]){{0,2}}?(?:{PEOPLE_NOUNS})\b"
         rf"|\bteams?\s+of\s+(?:just\s+|only\s+)?{SMALL_NUMBER}\b"
-        rf"|(?<![\d.,])\b{SMALL_NUMBER}[- ](?:person|people|member|strong)[- ]teams?\b",
+        rf"|(?<![\d.,])\b{SMALL_NUMBER}[- ](?:person|people|member|strong)[- ]teams?\b"
+        # Bare counts ("2 of 4 left", "1 in 20 quit"): the count itself is a small group.
+        rf"|(?<![\d.,])\b{SMALL_NUMBER}\s+(?:in|of|out\s+of)\s+(?:every\s+)?(?:\d{{1,3}}|one|two|three|four|five|six|seven|eight|nine|ten)\b"
+        # A count with no people word ("Two quit", "3 have since resigned", "Two are leaving").
+        rf"|(?<![\d.,])\b{SMALL_NUMBER}\s+(?:{LEAVE_FILLERS}\s+){{0,3}}{LEAVE_VERBS}\b"
+        # "Two of them left", "2 of the 9 new reps left", "lost 3 of its top performers".
+        rf"|(?<![\d.,])\b{SMALL_NUMBER}\s+of\s+(?:them|the|these|those|its|their|our|his|her)\b"
+        # Group words ("A duo of managers quit", "the pair left") and slash counts ("2/9").
+        r"|\b(?:duos?|trios?)\b|\b(?:a|the|this|that)\s+pair\b"
+        r"|(?<![\d.,])\b[1-4]\s*/\s*\d+\b",
         re.I)),
 ]
 
@@ -390,14 +446,18 @@ STRICT_PATTERNS = [
 # "level 3 engineers" names a level. These are removed before the small-group
 # check runs. Counts like "1 of 3 managers" or "1 in 4 engineers" are NOT
 # allowed: with a small group they say exactly how many people. Insights use
-# percentages instead.
+# percentages instead. Only the exact M2 definition (1 or 2 reports, 1-2 person
+# teams) and single levels are allowed: "reports" is also a people word, so
+# "3-4 direct reports quit" or "level 5 and 2 engineers" must still be checked.
+# The report range needs "with", "having", "have" or "has" in front ("managers
+# with 1-2 direct reports") and no leaving word after it, so "1-2 direct reports
+# quit" and "has 1 or 2 reports leaving" are checked too. No "band N":
+# C4 is "Out of band", so "Out of band 2 engineers are paid" would slip through.
 ALLOWED_PHRASES = re.compile(
-    r"\b[1-9]\s*(?:-|–|to|or)\s*\d+\s+(?:direct\s+)?reports?\b"
-    r"|\b(?:one|two|three|four)\s*(?:-|–|to|or)\s*(?:two|three|four|five)\s+(?:direct\s+)?reports?\b"
-    r"|\b[1-9]\s*(?:-|–|to|or)\s*\d+[- ]person teams?\b"
-    r"|\b(?:one|two)\s*(?:-|–|to|or)\s*(?:two|three)[- ]person teams?\b"
-    r"|\bvery small teams?\b"
-    r"|\b(?:levels?|grades?|bands?|tiers?)\s*\d+(?:\s*(?:-|–|to|and|or)\s*\d+)?\b"
+    r"\b(?:with|having|have|has)\s+(?:only\s+)?(?:1|one)-?\s*(?:-|–|to|or)\s*(?:2|two)\s+(?:direct\s+)?reports?\b"
+    rf"(?!\s+(?:(?:who|that)\s+)?(?:{LEAVE_FILLERS}\s+){{0,3}}{LEAVE_VERBS}\b)"   # not "has 1 or 2 reports leaving"
+    r"|\b(?:1|one)-?\s*(?:-|–|to|or)\s*(?:2|two)[- ]person teams?\b"
+    r"|\b(?:levels?|grades?|tiers?)\s*\d+\b"
     r"|\b(?-i:IC|M|L)\d{1,2}\b",
     re.I,
 )
@@ -407,7 +467,9 @@ def gate_hits(text, strict):
     """Returns (pattern name, matched phrase) pairs. The matched phrase may be
     the sensitive value itself, so it must only go back to the agent inside the
     beam, never to the browser, the receipt or a released file."""
-    text = text or ""
+    # Fold look-alike forms (full-width digits) and drop invisible format
+    # characters (zero-width space), so neither can hide a phrase.
+    text = "".join(c for c in unicodedata.normalize("NFKC", text or "") if unicodedata.category(c) != "Cf")
     patterns = BASIC_PATTERNS + (STRICT_PATTERNS if strict else [])
     hits = []
     for name, p in patterns:
@@ -434,7 +496,13 @@ MAX_INSIGHTS = 3
 
 
 def _number(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    # json.load reads NaN and Infinity; they compare False with everything, so
+    # they would slip past the size checks. Treat them as missing. (Ints are
+    # always finite but math.isfinite can't take very large ones. No real count
+    # or value is over 10**9, and a huge float n would make the count check
+    # below loop for a very long time, so cap floats too.)
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and (abs(v) <= 10**9 if isinstance(v, int) else math.isfinite(v) and abs(v) <= 1e9))
 
 
 def clean_metrics(raw):
@@ -465,6 +533,8 @@ def clean_metrics(raw):
                 out[mid] = {"label": mid, "value": None, "n": None, "unit": "", "status": "suppressed"}
                 continue
             value, n, status = m.get("value"), m.get("n"), m.get("status")
+            if isinstance(value, float) and not math.isfinite(value):
+                reasons.append(f"{where} {mid}: value is not a finite number")
             clean = {
                 "label": str(m.get("label", "")),
                 "value": value if _number(value) else None,
@@ -478,6 +548,20 @@ def clean_metrics(raw):
                 clean["value"], clean["n"] = None, None
             elif clean["n"] is None or clean["n"] < MIN_GROUP:
                 reasons.append(f"{where} {mid}: based on fewer than {MIN_GROUP} people")
+            elif mid in PLAIN_RATES:
+                # The worker's rule again: the people a plain rate counts, and
+                # the rest, must each be 0 or at least MIN_GROUP. The value is
+                # rounded to 0.1%, so at large n several counts fit it; block
+                # only if every count that fits is a small group (or none fits).
+                if not 0 <= clean["value"] <= 100:
+                    reasons.append(f"{where} {mid}: value is not a percentage")
+                else:
+                    size = int(clean["n"])
+                    centre = clean["value"] * size / 100
+                    lo, hi = max(0, math.floor(centre - size / 2000) - 1), min(size, math.ceil(centre + size / 2000) + 1)
+                    fits = (k for k in range(lo, hi + 1) if round(100 * k / size, 1) == clean["value"])
+                    if all(0 < k < MIN_GROUP or 0 < size - k < MIN_GROUP for k in fits):
+                        reasons.append(f"{where} {mid}: its count or the rest is a group under {MIN_GROUP}")
             for k in ("label", "unit"):
                 for name in gate_text(clean[k], strict=True):
                     reasons.append(f"{where} {mid} {k}: {name}")
@@ -498,6 +582,12 @@ def clean_metrics(raw):
         "orgs": {org: block((raw.get("orgs") or {}).get(org), org, with_headcount=True) for org in ORGS},
     }
     reasons += subtraction_check(metrics)
+    # n is for the checks above only. Released, the n values give small groups
+    # away by subtraction (C2 n minus R4 n is the number of top performers hired
+    # in the last 2 years), so nothing after the gate ever sees them.
+    for blk in [metrics["company"], *metrics["orgs"].values()]:
+        for mid in METRIC_IDS:
+            blk[mid].pop("n", None)
     return metrics, reasons
 
 
@@ -547,10 +637,22 @@ def subtraction_check(metrics):
     # P1 is each org's top-performer share minus the COMPANY share, and the
     # company share includes every org. So if one org's P1 is hidden, the
     # visible orgs' P1 values and headcounts still give its count back. P1 is
-    # released for every org or for none.
-    p1 = [metrics["orgs"][o]["P1"]["value"] is None for o in ORGS]
-    if any(p1) and not all(p1):
+    # released for every org or for none. An org with nobody active doesn't
+    # count as hidden: it has no P1 and hides nobody. If the company P1 is
+    # hidden, the org values would give the company share back.
+    shown = [o for o in ORGS if metrics["orgs"][o]["P1"]["value"] is not None]
+    hidden = [o for o in ORGS if metrics["orgs"][o]["P1"]["value"] is None and metrics["orgs"][o]["headcount"] != 0]
+    if shown and hidden:
         reasons.append("P1: suppressed for some orgs but shown for others, which reveals the hidden ones")
+    if shown and metrics["company"]["P1"]["value"] is None:
+        reasons.append("P1: shown for orgs while the company P1 is suppressed, which reveals it")
+    # R4's n (tenured top performers) is part of C2's n (all top performers),
+    # so the two give the top performers hired in the last 2 years.
+    for where, blk in [("company", metrics["company"]), *metrics["orgs"].items()]:
+        c2, r4 = blk["C2"], blk["R4"]
+        if c2["value"] is not None and r4["value"] is not None and c2["n"] is not None and r4["n"] is not None:
+            if small(c2["n"] - r4["n"]):
+                reasons.append(f"{where} C2 and R4: their n values differ by a group under {MIN_GROUP}")
     return reasons
 
 
@@ -621,10 +723,14 @@ Hard rules (a privacy gate will reject your output if you break them):
 - Never mention an individual, an employee code, a manager code, or a dollar amount.
 - Never describe a group of fewer than {min_group} people. Skip suppressed metrics.
 - Refer to metrics by ID (e.g. "R3") and use only the numbers in metrics.json.
-- Talk about rates and shares, not head counts. Don't write phrases like
-  "only one", "a single", "the only" or "3 people".
+- Talk about rates and shares, not head counts, and never quote a metric's
+  "n" (how many people it is based on). Don't write phrases like
+  "only one", "a single", "the only", "3 people", "1 in 4", "3 of 14" or
+  "one of the"; use percentages instead.
 - For M2, call it "very small teams" (managers with 1 or 2 direct reports);
   don't count or describe specific teams.
+- Don't name or describe teams, job families, levels or locations inside an
+  org; keep every insight at the org level.
 
 Return ONLY a JSON object, no prose, shaped exactly like:
 {{"Engineering": [{{"metric": "R4", "what": "...", "why": "...", "next_step": "..."}}, ...up to 3 items], "Product": [...], ...}}
@@ -741,10 +847,10 @@ def full_sha256(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def use_phase_toolkit(worker, emit):
+def use_phase_toolkit(worker):
     """Phase mode: the playbook and metrics script are already in the image.
-    Copy them into the run folder, and warn if they differ from this repo's
-    worker/ files (meaning the Phase needs rebuilding with `tsh phase apply`)."""
+    Copy them into the run folder, and stop the run if they differ from this
+    repo's worker/ files (meaning the Phase needs rebuilding with `tsh phase apply`)."""
     files = " ".join(f"{PHASE_TOOLKIT_DIR}/{f}" for f in TOOLKIT_FILES)
     try:
         out = worker.sh(f"mkdir -p {REMOTE_DIR} && cp {files} {REMOTE_DIR}/ && sha256sum {files}", timeout=60)
@@ -759,12 +865,11 @@ def use_phase_toolkit(worker, emit):
     in_image = {os.path.basename(line.split()[1]): line.split()[0] for line in out.strip().splitlines() if line.strip()}
     stale = [f for f in TOOLKIT_FILES if in_image.get(f) != full_sha256(os.path.join(WORKER_DIR, f))]
     if stale:
-        emit("blocked_warning",
-             f"The {PHASE} image is out of date: {', '.join(stale)} differ from this repo. "
-             "This run uses the image's version. Rebuild it with: tsh phase apply -f phase.yaml")
+        # Fail closed: an older metrics script may not apply today's privacy rules.
         worker.image = f"{PHASE} (Phase, OUT OF DATE: {', '.join(stale)})"
-    else:
-        worker.image = f"{PHASE} (Phase, toolkit matches repo)"
+        raise RuntimeError(f"The {PHASE} image is out of date: {', '.join(stale)} differ from this repo, "
+                           "so nothing was computed or released. Rebuild it with: tsh phase apply -f phase.yaml")
+    worker.image = f"{PHASE} (Phase, toolkit matches repo)"
 
 
 def playbook_flow(worker, dataset, emit):
@@ -777,7 +882,7 @@ def playbook_flow(worker, dataset, emit):
         worker.put(os.path.join(DATA_DIR, dataset["csv"]), "people_coded.csv")
     if PHASE and not LOCAL:
         emit("status", f"Using the playbook and metrics script built into the {PHASE} image...")
-        use_phase_toolkit(worker, emit)
+        use_phase_toolkit(worker)
     else:
         emit("status", "Copying the playbook and metrics script into the beam...")
         worker.put(os.path.join(WORKER_DIR, "playbook.md"), "playbook.md")
@@ -793,6 +898,11 @@ def playbook_flow(worker, dataset, emit):
     if reasons:
         emit("blocked", reasons)
         raise RuntimeError("privacy gate blocked the metrics; nothing was released")
+    # Claude's copy in the beam becomes the cleaned one too, so it has no n to quote.
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "metrics.json"), "w") as f:
+            json.dump(metrics, f, indent=2)
+        worker.put(os.path.join(tmp, "metrics.json"), "metrics.json")
 
     feedback, insights, reasons = "", None, []
     for attempt in (1, 2, 3):
@@ -907,7 +1017,6 @@ async function runAnalysis(dataset){
    else if(d.type==='dashboard')addMsg('dashwrap',d.html,true);
    else if(d.type==='error')addMsg('error',d.msg);
    else if(d.type==='blocked')addMsg('blocked','Privacy gate blocked this output: '+d.reasons.join('; '));
-   else if(d.type==='warning')addMsg('blocked','Warning: '+d.msg);
    else if(d.type==='receipt')addMsg('receipt',d.text);
    else if(d.type==='files'){const div=document.createElement('div');div.className='msg status';
      d.links.forEach(([href,label])=>{const a=document.createElement('a');a.href=href;a.textContent='Download '+label;
@@ -932,26 +1041,26 @@ def run_job(dataset, send):
     """One full run: provision, flow, teardown, receipt. Runs in its own thread
     so it always finishes (and always tears the beam down), even if the
     browser disconnects. `send(kind, **payload)` queues an event for the page."""
+    last_status = ["Starting the run"]   # names the step if an error has to be withheld
 
     def emit(kind, value):
-        if kind == "blocked_warning":
-            send("warning", msg=value)
-        elif kind == "blocked":
+        if kind == "blocked":
             send("blocked", reasons=value)
         elif kind == "dashboard":
             send("dashboard", html=value)
         elif kind == "report":
             send("report", content=value)
         else:
+            last_status[0] = value
             send("status", msg=value)
 
     worker = Worker()
     started = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
     released, outcome = [], "failed"
     try:
-        send("status", msg="Provisioning a fresh disposable worker beam...")
+        emit("status", "Provisioning a fresh disposable worker beam...")
         beam_id = worker.provision()
-        send("status", msg=f"Beam {beam_id} is up. Waiting for it to be ready...")
+        emit("status", f"Beam {beam_id} is up. Waiting for it to be ready...")
         worker.wait_ready()
         flow = playbook_flow if dataset["mode"] == "playbook" else freeform_flow
         run_dir = flow(worker, dataset, emit)
@@ -962,7 +1071,12 @@ def run_job(dataset, send):
     except Exception as exc:
         if "privacy gate" in str(exc):
             outcome = "blocked by privacy gate, nothing released"
-        send("error", msg=str(exc))
+        msg = str(exc)
+        if gate_hits(msg, strict=True):
+            # Error text can carry what the agent or a beam command printed
+            # (worker.sh raises with their output), so it must pass the gate too.
+            msg = f'This step failed: "{last_status[0]}" The details were withheld by the privacy gate.'
+        send("error", msg=msg)
     finally:
         gone = worker.teardown()
         if worker.beam_id and gone:
@@ -972,7 +1086,8 @@ def run_job(dataset, send):
             send("error", msg=f"Beam {worker.beam_id} was NOT confirmed removed: {worker.teardown_status}")
         if worker.unaccounted:
             send("error", msg="A beam may have been created that this app couldn't identify: "
-                              + ", ".join(worker.unaccounted) + ". Check `tsh beams ls` and remove it.")
+                              + ", ".join(worker.unaccounted) + ". Check `tsh beams ls --all` and remove it "
+                              "only if it is from this run: another tool may have added it.")
         receipt = [
             "RUN RECEIPT",
             f"  beam:        {worker.beam_id or '-'}",

@@ -101,20 +101,34 @@ def compute(rs, all_rows):
     avg_hc = len(active) + len(left12) / 2
     out = {"headcount": len(active)}
 
-    out["R1"] = metric("R1", pct(len(vol), avg_hc), len(active), groups=(len(vol),))
+    # R1 with R2's n and the headcount gives len(left12), so the leavers who
+    # weren't voluntary are a group too.
+    out["R1"] = metric("R1", pct(len(vol), avg_hc), len(active), groups=(len(vol), len(left12) - len(vol)))
     out["R2"] = rate("R2", sum(r["regretted"] for r in vol), len(vol))
     hires = [r for r in rs if r["hire_date"] > REF - 2 * YEAR]
     first_yr = [r for r in hires if r["term_date"] and (r["term_date"] - r["hire_date"]) <= YEAR]
     out["R3"] = rate("R3", len(first_yr), len(hires))
     top_tenured = [r for r in active if r["rating_current"] == TOP and r["hire_date"] < REF - 2 * YEAR]
     stalled = [r for r in top_tenured if not r["last_promo_date"] or r["last_promo_date"] < REF - 2 * YEAR]
-    out["R4"] = rate("R4", len(stalled), len(top_tenured))
+    # R4's n is nested in the top performers (C2's n) and the headcount, so
+    # the top performers hired in the last 2 years, and everyone active who
+    # isn't a tenured top performer, are groups too. Those recent top
+    # performers are also among R3's hires who didn't leave in their first
+    # year, so the rest of those hires are a group too.
+    n_top_all = sum(1 for r in active if r["rating_current"] == TOP)
+    out["R4"] = metric("R4", pct(len(stalled), len(top_tenured)), len(top_tenured),
+                       groups=(len(stalled), len(top_tenured) - len(stalled),
+                               n_top_all - len(top_tenured), len(active) - len(top_tenured),
+                               len(hires) - len(first_yr) - (n_top_all - len(top_tenured))))
 
     spans = {}
     for r in active:
         if r["manager_code"]:
             spans[r["manager_code"]] = spans.get(r["manager_code"], 0) + 1
     s = list(spans.values())
+    # M1 times its n gives how many active people have no manager in the data.
+    # Deliberately not checked: it only reveals how many people sit at the top
+    # of the org chart, which isn't sensitive.
     out["M1"] = metric("M1", round(statistics.mean(s), 1) if s else None, len(s))
     out["M2"] = rate("M2", sum(1 for x in s if x <= 2), len(s))
     out["M3"] = rate("M3", sum(1 for r in active if r["manager_changes_12m"] > 0), len(active))
@@ -126,13 +140,20 @@ def compute(rs, all_rows):
     out["P1"] = metric("P1", round(org_top - co_top, 1) if org_top is not None else None, len(active),
                        groups=(n_top, len(active) - n_top))
     promos = [r for r in rs if r["last_promo_date"] and r["last_promo_date"] > REF - YEAR]
-    out["P2"] = metric("P2", pct(len(promos), avg_hc), len(active), groups=(len(promos),))
+    # Promotions are among the active people and the last 12 months' leavers
+    # (R1 and R2 give that total), so the ones not promoted are a group too.
+    out["P2"] = metric("P2", pct(len(promos), avg_hc), len(active),
+                       groups=(len(promos), len(active) + len(left12) - len(promos)))
     stuck = [r for r in active if (r["last_promo_date"] or r["hire_date"]) < REF - 3 * YEAR]
     out["P3"] = rate("P3", len(stuck), len(active))
 
     out["C1"] = metric("C1", round(statistics.median(r["pos"] for r in active), 3) if active else None, len(active))
     top = [r for r in active if r["rating_current"] == TOP]
-    out["C2"] = rate("C2", sum(1 for r in top if r["pos"] < 0.95), len(top))
+    # C2's n is nested in the headcount, so the active people who aren't top
+    # performers are a group too (P1 checks the same when it's shown).
+    underpaid = sum(1 for r in top if r["pos"] < 0.95)
+    out["C2"] = metric("C2", pct(underpaid, len(top)), len(top),
+                       groups=(underpaid, len(top) - underpaid, len(active) - len(top)))
     # C3: compare new hires with tenured staff AT THE SAME LEVEL. For each level
     # that has both groups, take the gap in median band position, then average
     # the gaps weighted by the number of new hires at that level. A level is
@@ -147,7 +168,16 @@ def compute(rs, all_rows):
             n_new += len(new)
             n_old += len(old)
     comp = round(100 * sum(g * w for g, w in gaps) / sum(w for _, w in gaps), 1) if gaps else None
-    out["C3"] = metric("C3", comp, min(n_new, n_old))
+    # C3's n is the smaller of its two groups, and each sits inside other
+    # released populations: the new hires inside R3's hires who didn't leave
+    # in their first year, and inside the active people who aren't stuck (P3)
+    # or tenured top performers (R4); the tenured staff inside the active
+    # people who aren't recent top performers (R4, C2). Those differences are
+    # groups too.
+    out["C3"] = metric("C3", comp, min(n_new, n_old),
+                       groups=(len(hires) - len(first_yr) - n_new, len(active) - len(stuck) - n_new,
+                               len(active) - len(top_tenured) - n_new,
+                               len(active) - n_old - (n_top_all - len(top_tenured))))
     oob = sum(1 for r in active if r["base_salary"] < r["band_min"] or r["base_salary"] > r["band_max"])
     out["C4"] = rate("C4", oob, len(active))
     return out
@@ -190,14 +220,20 @@ def protect_company(company, orgs, rows):
     P1 needs more: each org's P1 is its top-performer share minus the company
     share, and the company share includes every org. So the visible orgs' P1
     values give back a hidden org's count even when the company P1 (always 0)
-    is hidden. If any org's P1 is suppressed, or the group outside ORGS would
-    be, P1 is suppressed everywhere. app.py's gate checks the same rule."""
+    is hidden. If the company P1 or any org's P1 is suppressed, or the group
+    outside ORGS would be, P1 is suppressed everywhere. An org with nobody
+    active doesn't count as hidden: it has no P1 and hides nobody. app.py's
+    gate checks the same rule."""
     other = [r for r in rows if r["org"] not in ORGS]   # never shown on its own
     hidden_company = []
     for mid in THRESHOLDS:
         if company[mid]["value"] is None:
+            if mid == "P1":   # the org P1 values would give the company share back
+                for org in ORGS:
+                    orgs[org]["P1"] = suppressed(orgs[org]["P1"])
             continue
-        hidden = [org for org in ORGS if orgs[org][mid]["value"] is None]
+        hidden = [org for org in ORGS if orgs[org][mid]["value"] is None
+                  and not (mid == "P1" and orgs[org]["headcount"] == 0)]
         if not hidden and not other:
             continue
         group = other + [r for r in rows if r["org"] in hidden]

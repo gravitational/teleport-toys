@@ -121,13 +121,13 @@ The agent writes results as a structured file. A fixed template renders it as th
 
 The privacy gate runs after the agent finishes and blocks any read-out that contains:
 
-1. A number that describes fewer than **5 people**: a population under 5, or a count within it (or the remainder) of 1 to 4. (`compute_metrics.py` suppresses these before the agent sees them, and the gate checks again.)
-2. A company figure that, minus the visible org figures, would reveal a suppressed org's number. `compute_metrics.py` treats all the hidden orgs for a measure, plus anyone whose org isn't one of the 5, as one group and hides the company figure if that group is under the minimum too. Because org headcounts are always shown, people outside the 5 orgs are also checked on their own. P1 compares each org with the company, so a hidden org's P1 could be worked out from the others: if any org's P1 is suppressed, P1 is suppressed for every org. The gate repeats these checks.
+1. A number that describes fewer than **5 people**: a population under 5, or a count within it (or the remainder) of 1 to 4. (`compute_metrics.py` suppresses these before the agent sees them. The gate repeats the check for every shown measure: n of 5 or more, and the count and remainder of every plain-rate measure.) It treats every population size as if it could be worked out from the released numbers, so it also suppresses a measure when the difference between two nested groups is 1 to 4 people: R1 (leavers minus voluntary leavers), R4 (top performers hired in the last 2 years, and everyone who isn't a tenured top performer), C2 (headcount minus top performers), P2 and C3 (its new hires, set against R3's hires and other nested groups). M1 skips the number of people with no manager, because that only shows who sits at the top of the org chart. The gate repeats only the C2 and R4 difference. The other nested-group checks (R1's non-voluntary leavers, P2, C2's non-top-performers, R4's other groups, C3's groups) run only in `compute_metrics.py`, and the app refuses to run an outdated worker image, so those checks can't be skipped.
+2. A company figure that, minus the visible org figures, would reveal a suppressed org's number. `compute_metrics.py` treats all the hidden orgs for a measure, plus anyone whose org isn't one of the 5, as one group and hides the company figure if that group is under the minimum too. Because org headcounts are always shown, people outside the 5 orgs are also checked on their own. P1 compares each org with the company, so a hidden org's P1 could be worked out from the others: if the company P1 is hidden, or any org with people in it has P1 hidden, P1 is hidden for every org. An org with nobody active doesn't count. The gate repeats the company-minus-orgs subtraction, the check on people outside the 5 orgs, and the all-or-none rule for P1.
 3. A currency amount. Comp appears only as band positions and percentages.
 4. An `emp_code` or `manager_code`.
-5. A phrase that points to a very small group, such as "the only," "a single," "a lone," "3 people," "two engineers," "one employee," "a team of three" or "1 of 3 managers." Counts like "1 in 4" or "2 of 4" are blocked too, because with a small group they say exactly how many people; use percentages. Level names ("level 3," "IC3") and measure definitions ("managers with 1-2 direct reports") are allowed.
+5. A phrase that points to a very small group, such as "the only," "a single," "a lone," "3 people," "two engineers," "one employee," "a team of three" or "1 of 3 managers." Counts like "1 in 4" or "2 of 4" are blocked too, because with a small group they say exactly how many people; use percentages. So are a small number followed by a verb for leaving or joining ("Two quit," "Both left," "Two have since left"), "Two of them left," slash counts like "2/9," "1 in every 5" and group words like "a duo." The gate first normalizes the text (NFKC, invisible characters removed). Three things are allowed: a level name with one number ("level 3," "IC3"; level ranges and "band N" are not on the allowed list), "managers with 1 or 2 direct reports" (the range must follow "with," "having," "have" or "has," and is never allowed when a word for leaving or joining follows it, as in "Sales has 1 or 2 reports leaving"), and "1-2 person teams."
 6. An email address, SSN-like or bank-account-like pattern.
-7. An insight about a measure that is suppressed for that org, or a measure ID, org or field the app doesn't know. Only the `metric`, `what`, `why` and `next_step` fields of each insight are kept, and every one of them is checked.
+7. An insight about a measure that is suppressed for that org, or a measure ID, org or field the app doesn't know. Only the `metric`, `what`, `why` and `next_step` fields of each insight are kept, and every one of them is checked. Insights stay at the org level: the agent must not name or describe teams, job families, levels or locations.
 
 Blocked read-outs go back to the agent with the reason and the phrase that triggered it, for example: `Sales insight 2 why: reference to a very small group ("two engineers")`. The agent gets up to 3 tries. The person running the app sees only the reason, not the phrase.
 
@@ -150,8 +150,8 @@ At the reference date 2026-10-01:
 
 | Org | Should be red | Also visible | Suppressed |
 |---|---|---|---|
-| Engineering | R2 regretted attrition, R4 high-performer stall, C2 top performers paid low | R1 on watch | C4 |
-| Product | M1 span, M2 very small teams, M3 manager churn | | R1, R2, P2, P3, C3 |
-| Sales | R1 attrition, R3 first-year attrition, C3 pay compression | | R2, R4, M3, C2 |
+| Engineering | R2 regretted attrition, C2 top performers paid low | | R1, R4, C4 |
+| Product | M1 span, M2 very small teams, M3 manager churn | | R1, R2, R4, P2, P3, C3 |
+| Sales | R3 first-year attrition, C3 pay compression | | R1, R2, R4, M3, C2 |
 | Marketing | P1 rating skew, P2 promotion rate | | R1, R2, R4, M3, P3, C3 |
-| G&A | None (healthy comparison) | | R1, R2, M3, P3, C3 |
+| G&A | None (healthy comparison) | | R1, R2, R4, M3, P3, C3 |
