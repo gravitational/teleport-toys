@@ -18,7 +18,7 @@ from mcp.client.streamable_http import streamablehttp_client
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = 18765
 STREAM = 18766
-EXPECTED = {"drive", "look", "stop", "say", "get_telemetry", "snapshot"}
+EXPECTED = {"drive", "look", "stop", "resume", "say", "get_telemetry", "snapshot"}
 
 
 @pytest.fixture(scope="module")

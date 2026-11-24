@@ -23,7 +23,8 @@ Nothing on the robot listens on a public interface, and the beam holds no model 
 |---|---|:-:|:-:|
 | `snapshot` | JPEG from the camera (the agent can see it) | ✅ | ✅ |
 | `get_telemetry` | dead-reckoned pose, ultrasonic distance, grayscale, camera angles | ✅ | ✅ |
-| `stop` | stop all motion now | ✅ | ✅ |
+| `stop` | emergency stop: stop now and refuse `drive` until resumed | ✅ | ✅ |
+| `resume` | clear the emergency stop (not in either role: see [Safety limits](#safety-limits-enforced-on-the-robot-whoever-calls)) | | |
 | `look` | pan/tilt the camera | | ✅ |
 | `drive` | speed −40..40, 0.1–3 s, steer ±30°. Stops itself near obstacles. | | ✅ |
 | `say` | speak a short sentence | | ✅ |
@@ -38,7 +39,7 @@ it. The `picar-stream` role grants that app; add it next to `picar-viewer` or `p
 
 ## Try it with no robot (2 minutes)
 
-The simulator has the same six tools, a camera and telemetry as the real car, so everything below works without
+The simulator has the same seven tools, a camera and telemetry as the real car, so everything below works without
 hardware. Pick where the fake robot lives:
 
 | | Robot runs | Dashboard runs | Needs | Good for |
@@ -162,9 +163,17 @@ The robot also fails safe when hardware misbehaves:
   if you accept driving without it.
 - The motors are zeroed at startup, on SIGTERM and at exit.
 
-**STOP** in the dashboard cancels the running chat job and the auto-mapper, stops the car (through the stream app, or the
-MCP `stop` tool if there is none), and **halts** the dashboard: it refuses every robot call except `stop` until you press
-**Resume**. If the stop could not reach the robot the page says so.
+**STOP** is a latch on the robot, not just a message from the dashboard. The dashboard's STOP button, the MCP `stop` tool
+and the stream app's `/stop` all stop the motors and make the robot refuse `drive` until it is resumed. That covers a
+drive request that was already on its way when you pressed STOP, and any other client: Claude Code running in another
+beam is refused too. STOP also cancels the dashboard's running chat job and auto-map and halts the dashboard (423 on
+every robot call except stop) until you press **Resume**. If the stop could not reach the robot the page says so, and if
+Resume can't reach it the robot stays stopped.
+
+Clearing the latch is deliberate. The `resume` tool is in neither `picar-viewer` nor `picar-driver`, so an agent can't undo
+a stop. Resume works through the stream app (`picar-stream`) or a role that grants `resume` (the built-in `mcp-user`
+does). Give `picar-stream` to the dashboard's beam and not to beams that run Claude Code. Everyday stops don't latch: letting go
+of the drive pad, or ending or cancelling an auto-map run, uses a plain speed-0 stop.
 
 ## Put it on Teleport
 
@@ -232,7 +241,7 @@ The bot (or user) needs a Teleport role granting access to those databases. The 
 | `OPENAI_REASONING` | `low` | reasoning effort; a robot loop wants quick turns |
 | `ROBOT_MCP_NAME` | `picar-mcp` | Teleport MCP app to connect to |
 | `ROBOT_STREAM_APP` | `picar-stream` | Teleport app for video/telemetry (empty = skip) |
-| `ROBOT_TOOLS` | all six | which tools the UI shows as granted vs. locked |
+| `ROBOT_TOOLS` | the six driving tools (`resume` is shown only if your roles grant it) | which tools the UI shows as granted vs. locked |
 | `BEAM_EXPIRES` | unset | shown in the UI; copy it from `tsh beams ls` |
 | `MAX_SPEED`, `MAX_DRIVE_SECONDS`, `OBSTACLE_STOP_CM` | 40, 3, 20 | robot-side safety limits |
 | `SENSOR_MAX_AGE_S`, `ALLOW_BLIND_FORWARD` | 0.5, off | robot-side: how old an ultrasonic reading may be; `1` allows forward motion without one |

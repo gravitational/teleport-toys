@@ -69,7 +69,7 @@ def test_stream_port_has_no_mcp_and_cannot_drive(own_robot):
     assert t["pose"]["x_cm"] == x0 and t["moving"] is False, "a POST to the stream app moved the car"
     # the stream app still does its job: watch and stop
     assert httpx.get(f"{r.stream}/snapshot.jpg").content[:2] == b"\xff\xd8"
-    assert httpx.post(f"{r.stream}/stop").json() == {"result": "stopped"}
+    assert httpx.post(f"{r.stream}/stop").json() == {"result": "stopped", "halted": True}
 
 
 def test_mcp_port_serves_only_mcp(own_robot):
@@ -148,7 +148,7 @@ def test_stop_cancels_the_running_chat_job_and_latches(own_robot, start_app, llm
     assert tele(r)["moving"] is False
     assert app.post("/api/drive/stop").json()["ok"], "stop itself is always allowed"
 
-    assert app.post("/api/resume").json() == {"ok": True, "halted": False}
+    assert app.post("/api/resume").json() == {"ok": True, "halted": False, "via": "stream"}
     assert app.get("/api/state").json()["halted"] is False
     assert app.post("/api/drive", json={"speed": 20, "seconds": 0.3}).json()["ok"]
 
@@ -412,3 +412,226 @@ def test_robot_hat_lite_stop_command_zeroes_the_motors(monkeypatch, capsys):
 def test_readme_says_the_dashboard_acts_with_the_beams_roles_not_the_visitors():
     text = (EXAMPLE / "README.md").read_text()
     assert "Who can open the published URL" in text and "beam's roles" in text
+
+
+# =========================================================================== STOP is a latch on the robot
+def mcp_call(url, tool, args=None):
+    import asyncio
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    async def go():
+        async with streamablehttp_client(url) as (r, w, _):
+            async with ClientSession(r, w) as s:
+                await s.initialize()
+                return await s.call_tool(tool, args or {})
+    res = asyncio.run(go())
+    return res, "".join(c.text for c in res.content if c.type == "text")
+
+
+DRIVE = {"speed": 20, "seconds": 0.5}
+
+
+def x_of(r):
+    return tele(r)["pose"]["x_cm"]
+
+
+def test_stop_latches_on_the_robot_until_resume(own_robot):
+    r = own_robot()
+    assert not mcp_call(r.mcp, "drive", DRIVE)[1].startswith("refused") and x_of(r) > 0
+    assert httpx.post(f"{r.stream}/stop").json()["halted"] is True
+    assert tele(r)["halted"] is True and tele(r)["moving"] is False
+    x = x_of(r)
+    _, text = mcp_call(r.mcp, "drive", DRIVE)           # a different client, or a request that was already on the wire
+    assert text.startswith("refused") and "latched" in text
+    _, text = mcp_call(r.mcp, "drive", {"speed": -20, "seconds": 0.5})
+    assert text.startswith("refused"), "reverse is motion too"
+    time.sleep(0.8)
+    assert x_of(r) == x and tele(r)["moving"] is False
+    assert httpx.post(f"{r.stream}/resume").json() == {"result": "resumed", "halted": False}
+    assert tele(r)["halted"] is False
+    assert not mcp_call(r.mcp, "drive", DRIVE)[1].startswith("refused") and x_of(r) > x
+
+
+def test_the_mcp_stop_tool_latches_and_the_resume_tool_clears_it(own_robot):
+    r = own_robot()
+    assert "latched" in mcp_call(r.mcp, "stop")[1] and tele(r)["halted"] is True
+    assert mcp_call(r.mcp, "drive", DRIVE)[1].startswith("refused")
+    assert mcp_call(r.mcp, "resume")[1] == "resumed" and tele(r)["halted"] is False
+    assert not mcp_call(r.mcp, "drive", DRIVE)[1].startswith("refused")
+
+
+def test_release_stops_without_latching(own_robot):
+    r = own_robot()
+    mcp_call(r.mcp, "drive", {"speed": 20, "seconds": 3, "wait": False})
+    time.sleep(0.3)
+    assert tele(r)["moving"] is True
+    assert httpx.post(f"{r.stream}/release").json() == {"result": "stopped"}
+    assert tele(r)["moving"] is False and tele(r)["halted"] is False
+    assert not mcp_call(r.mcp, "drive", DRIVE)[1].startswith("refused")
+
+
+def test_a_drive_in_flight_is_cut_short_and_the_next_one_is_refused(own_robot):
+    r = own_robot()
+    done = {}
+    t = threading.Thread(target=lambda: done.update(text=mcp_call(r.mcp, "drive", {"speed": 20, "seconds": 3})[1]))
+    t.start()
+    time.sleep(0.6)
+    assert tele(r)["moving"] is True
+    httpx.post(f"{r.stream}/stop")
+    time.sleep(0.15)
+    assert tele(r)["moving"] is False
+    x = x_of(r)
+    t.join(8)
+    assert mcp_call(r.mcp, "drive", DRIVE)[1].startswith("refused")
+    time.sleep(0.5)
+    assert x_of(r) == pytest.approx(x, abs=0.5)
+
+
+def test_claude_code_in_another_beam_cannot_drive_after_a_dashboard_stop(own_robot, start_app):
+    r = own_robot()
+    app = start_app(robot_mcp=r.mcp, ROBOT_STREAM_URL=r.stream)
+    assert app.post("/api/drive", json={"speed": 20, "seconds": 3}).json()["ok"]
+    time.sleep(0.3)
+    assert app.post("/api/stop").status_code == 200
+    x = x_of(r)
+    res, text = mcp_call(r.mcp, "drive", DRIVE)         # what an agent in a different beam would send
+    assert text.startswith("refused")
+    time.sleep(0.6)
+    assert x_of(r) == pytest.approx(x, abs=0.5) and tele(r)["moving"] is False
+    assert app.post("/api/resume").json()["via"] == "stream"
+    assert not mcp_call(r.mcp, "drive", DRIVE)[1].startswith("refused")
+
+
+class SlowProxy:
+    """TCP proxy that waits `delay` seconds before it connects each new connection: a slow Teleport hop."""
+
+    def __init__(self, target_port, delay):
+        import socket
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port, self.target, self.delay = self.sock.getsockname()[1], target_port, delay
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while True:
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(c,), daemon=True).start()
+
+    def _serve(self, c):
+        import socket
+        time.sleep(self.delay)
+        try:
+            u = socket.create_connection(("127.0.0.1", self.target))
+        except OSError:
+            c.close()
+            return
+
+        def pump(a, b):
+            try:
+                while (d := a.recv(65536)):
+                    b.sendall(d)
+            except OSError:
+                pass
+            finally:
+                for s in (a, b):
+                    try:
+                        s.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+        threading.Thread(target=pump, args=(c, u), daemon=True).start()
+        threading.Thread(target=pump, args=(u, c), daemon=True).start()
+
+    def close(self):
+        self.sock.close()
+
+
+def test_a_pad_press_still_opening_its_session_when_stop_is_pressed_never_moves_the_car(own_robot, start_app):
+    """The reviewer's race: a drive-pad press whose MCP session is still opening when STOP lands used to reach the
+    robot afterwards and move it."""
+    r = own_robot()
+    slow = SlowProxy(r.port, delay=1.0)
+    try:
+        app = start_app(robot_mcp=f"http://127.0.0.1:{slow.port}/mcp", ROBOT_STREAM_URL=r.stream)
+        got = {}
+        t = threading.Thread(target=lambda: got.update(resp=app.post("/api/drive", json={"speed": 20, "seconds": 3}, timeout=40)))
+        t.start()
+        time.sleep(0.4)                                  # the press is in flight, its session not open yet
+        assert app.post("/api/stop").status_code == 200
+        t.join(30)
+        assert got["resp"].status_code == 423
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            assert tele(r)["moving"] is False and x_of(r) == 0.0, "the car moved after STOP"
+            time.sleep(0.1)
+    finally:
+        slow.close()
+
+
+def test_the_dashboard_follows_a_latch_set_by_another_client_and_can_clear_it(own_robot, start_app):
+    r = own_robot()
+    app = start_app(robot_mcp=r.mcp, ROBOT_STREAM_URL=r.stream)
+    assert app.get("/api/state").json()["halted"] is False
+    mcp_call(r.mcp, "stop")                              # e.g. Claude Code pressed the emergency stop
+    deadline = time.time() + 5
+    while time.time() < deadline and not app.get("/api/state").json()["halted"]:
+        time.sleep(0.2)
+    assert app.get("/api/state").json()["halted"] is True, "the page would not show Resume"
+    assert app.post("/api/resume").status_code == 200
+    assert tele(r)["halted"] is False
+
+
+def test_stop_and_resume_work_without_a_stream_app(own_robot, start_app):
+    """The Kubernetes path with ROBOT_STREAM_APP empty: everything goes through the MCP tools."""
+    r = own_robot()
+    app = start_app(robot_mcp=r.mcp, ROBOT_STREAM_URL="http://127.0.0.1:1")
+    assert app.post("/api/drive", json={"speed": 20, "seconds": 3}).json()["ok"]
+    time.sleep(0.3)
+    stop = app.post("/api/stop")
+    assert stop.status_code == 200 and stop.json()["via"] == "mcp"
+    assert tele(r)["halted"] is True and tele(r)["moving"] is False
+    assert app.post("/api/resume").json()["via"] == "mcp"
+    assert tele(r)["halted"] is False
+    assert app.post("/api/drive", json={"speed": 20, "seconds": 0.3}).json()["ok"]
+
+
+def test_resume_that_cannot_reach_the_robot_keeps_everything_stopped(start_app):
+    app = start_app(robot_mcp="http://127.0.0.1:1/mcp", ROBOT_STREAM_URL="http://127.0.0.1:1")
+    assert app.post("/api/stop").status_code == 502
+    resume = app.post("/api/resume")
+    assert resume.status_code == 502 and resume.json()["ok"] is False and resume.json()["halted"] is True
+    assert app.get("/api/state").json()["halted"] is True
+    assert app.post("/api/chat", json={"message": "go", "task": "count"}).status_code == 423
+
+
+def test_everyday_stops_do_not_latch(own_robot, start_app):
+    r = own_robot()
+    app = start_app(robot_mcp=r.mcp, ROBOT_STREAM_URL=r.stream)
+    assert app.post("/api/drive", json={"speed": 20, "seconds": 3}).json()["ok"]
+    time.sleep(0.3)
+    assert app.post("/api/drive/stop").json()["ok"]                       # letting go of the pad
+    assert tele(r)["moving"] is False and tele(r)["halted"] is False
+    assert app.post("/api/automap/start", json={"vision": False, "max_moves": 10, "max_minutes": 1}).json() == {"ok": True}
+    time.sleep(1.2)
+    assert app.post("/api/automap/stop").json() == {"ok": True}           # cancelling an auto-map run
+    deadline = time.time() + 15
+    while time.time() < deadline and app.get("/api/state").json()["auto"]["state"] in ("starting", "scanning", "stopping", "moving", "exploring"):
+        time.sleep(0.3)
+    assert tele(r)["moving"] is False and tele(r)["halted"] is False, "ending an auto-map run latched the robot"
+    assert app.post("/api/drive", json={"speed": 20, "seconds": 0.3}).json()["ok"]
+
+
+def test_default_roles_cannot_resume_a_stop():
+    _, roles = _apps_and_roles()
+    for role in ("picar-viewer", "picar-driver"):
+        tools = roles[role]["mcp"]["tools"]
+        assert "stop" in tools and "resume" not in tools, role
+
+
+def test_readme_explains_the_latch():
+    text = (EXAMPLE / "README.md").read_text()
+    assert "STOP** is a latch on the robot" in text and "`resume`" in text and "Claude Code" in text

@@ -8,7 +8,12 @@
 # Why two kinds of grant: `mcp.tools` only filters MCP apps. A role that matched the stream app and the robot's
 # MCP endpoint through one label would let a viewer POST `tools/call drive` through the HTTP app and bypass the
 # tool list. So the MCP grants carry `teleport.internal/app-sub-kind: mcp` (they can only ever match MCP apps),
-# and the HTTP app is on a port that serves nothing but read-only streams and `/stop`.
+# and the HTTP app is on a port that serves nothing but read-only streams, `/stop`, `/release` and `/resume`.
+#
+# Emergency stop is a latch on the robot: the `stop` tool (and /stop) stops the car and refuses `drive` until someone
+# resumes. Resuming is deliberately not in the viewer or driver tool lists, so an agent cannot clear the latch itself.
+# It is part of picar-stream (POST /resume) and of the built-in mcp-user role (every tool). Give picar-stream to the
+# dashboard's beam, not to a beam that runs Claude Code.
 # Put the role on the *beam* with `--roles`; never let a beam inherit your admin roles.
 # `mcp.tools` is what Teleport shows the agent in tools/list; anything not listed is invisible to it.
 #
@@ -52,7 +57,7 @@ kind: role
 version: v8
 metadata:
   name: picar-stream
-  description: Watch the PiCar-X video and telemetry (and hit stop) through the plain HTTP app. Cannot drive.
+  description: Watch the PiCar-X video and telemetry through the plain HTTP app, hit stop, and resume after a stop. Cannot drive.
 spec:
   allow:
     app_labels:

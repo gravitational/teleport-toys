@@ -83,7 +83,8 @@ COMMON_RULES = """You are BeamBot, a small PiCar-X robot in an office. You see t
 and sense distance with a forward ultrasonic sensor. Drive in short moves (<= 3s, speed <= 40). The robot refuses
 to drive into obstacles closer than 20 cm. Positions are dead-reckoned estimates in cm from the start point.
 If a tool you need is missing, Teleport RBAC has not granted it to this identity: say so plainly.
-Keep replies short and concrete."""
+`drive` ends by itself, so you never need `stop` to finish a move: `stop` is an emergency stop that blocks driving until a
+human resumes it. Keep replies short and concrete."""
 
 TASKS = {
     "count": {
@@ -880,51 +881,88 @@ async def reset(req: Request):
     return {"ok": True}
 
 
-@app.post("/api/stop")
-async def stop():
-    """Emergency stop: latch `halt`, end everything that could move the robot, then stop the motors.
-    The fast path is the stream app's /stop; without a stream app (or if it fails) the MCP `stop` tool does it.
-    Only a 200 means the robot was told to stop: anything else is reported as an error."""
-    halt.update(on=True, at=time.time())
-    manual_stop["gen"] += 1
-    auto_mapper.stop("emergency stop")
-    running = [t for t in _job_tasks if not t.done()]
-    for t in running:
-        t.cancel()
-    if running:   # wait for them to let go, so no already-issued drive lands after the stop below
-        await asyncio.wait(running, timeout=3)
+async def robot_estop():
+    """Latch the emergency stop ON THE ROBOT: the stream app's /stop, or the MCP `stop` tool if there is no stream
+    app or it fails. Both stop the motors and make the robot refuse `drive` until it is resumed, so a drive that is
+    already on the wire (a pad press whose MCP session is still opening, an agent call mid-flight) or one from
+    another client is refused when it arrives. Returns (ok, via, text-or-errors)."""
     errors = []
     try:
         async with httpx.AsyncClient(timeout=3) as http:
             r = await http.post(f"{ROBOT_STREAM_URL}/stop")
         r.raise_for_status()
-        return {"ok": True, "halted": True, "via": "stream", "result": r.json().get("result", "stopped")}
+        return True, "stream", r.json().get("result", "stopped")
     except Exception as e:  # noqa: BLE001
         errors.append(f"stream app: {why(e)}")
     resp = await robot_call("stop", {})
     body = json.loads(resp.body)
     if body.get("ok"):
-        return {"ok": True, "halted": True, "via": "mcp", "result": body.get("result", "stopped")}
+        return True, "mcp", body.get("result", "stopped")
     errors.append(f"MCP stop: {body.get('error') or body.get('result')}")
-    return JSONResponse({"ok": False, "halted": True, "error": "; ".join(errors)}, status_code=502)
+    return False, None, "; ".join(errors)
+
+
+@app.post("/api/stop")
+async def stop():
+    """Emergency stop: latch it on the robot first, then end everything in this app that could move the robot.
+    Only a 200 means the robot was told to stop: anything else is reported as an error. Cancelling the chat job
+    stops NEW calls; the latch on the robot is what refuses the ones that were already sent."""
+    halt.update(on=True, at=time.time())
+    manual_stop["gen"] += 1
+    auto_mapper.stop("emergency stop")
+    ok, via, text = await robot_estop()
+    running = [t for t in _job_tasks if not t.done()]
+    for t in running:
+        t.cancel()
+    if running:
+        await asyncio.wait(running, timeout=3)
+    if ok:
+        return {"ok": True, "halted": True, "via": via, "result": text}
+    return JSONResponse({"ok": False, "halted": True, "error": text}, status_code=502)
 
 
 @app.post("/api/resume")
 async def resume():
-    halt.update(on=False, at=None)
-    return {"ok": True, "halted": False}
+    """Clear the latch on the robot (stream app, or the MCP `resume` tool), then in this app. If the robot can't be
+    reached the latch stays: the page keeps showing Resume."""
+    errors = []
+    try:
+        async with httpx.AsyncClient(timeout=3) as http:
+            r = await http.post(f"{ROBOT_STREAM_URL}/resume")
+        r.raise_for_status()
+        via = "stream"
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"stream app: {why(e)}")
+        body = json.loads((await robot_call("resume", {})).body)
+        if not body.get("ok"):
+            errors.append(f"MCP resume: {body.get('error') or body.get('result')}"
+                          " (resuming needs the picar-stream role, or a role that grants the `resume` tool)")
+            return JSONResponse({"ok": False, "halted": True, "error": "; ".join(errors)}, status_code=502)
+        via = "mcp"
+    halt.update(on=False, at=None, cleared=time.time())
+    return {"ok": True, "halted": False, "via": via}
+
+
+EXEMPT_WHEN_HALTED = ("stop", "resume")   # the only robot calls an emergency stop does not block
 
 
 async def robot_call(tool, args):
     """One robot MCP tool call through Teleport, logged like the agent's calls."""
-    if halt["on"] and tool != "stop":
-        return JSONResponse({"ok": False, "halted": True, "error": HALT_MSG}, status_code=423)
+    refused = JSONResponse({"ok": False, "halted": True, "error": HALT_MSG}, status_code=423)
+    if halt["on"] and tool not in EXEMPT_WHEN_HALTED:
+        return refused
     t0 = time.time()
     try:
+        blocked = False
         async with streamablehttp_client(ROBOT_MCP_URL) as (r, w, _):
             async with ClientSession(r, w) as s:
-                await s.initialize()
-                res = await s.call_tool(tool, args)
+                await s.initialize()          # can take seconds: STOP may have been pressed meanwhile
+                if halt["on"] and tool not in EXEMPT_WHEN_HALTED:
+                    blocked = True
+                else:
+                    res = await s.call_tool(tool, args)
+        if blocked:
+            return refused
         text = next((c.text for c in res.content if c.type == "text"), "")
         log_activity(tool, args, not res.isError, round((time.time() - t0) * 1000), "manual: " + text)
         return JSONResponse({"ok": not res.isError, "result": text}, status_code=502 if res.isError else 200)
@@ -954,27 +992,36 @@ async def manual_drive(req: Request):
 
 @app.post("/api/drive/stop")
 async def manual_drive_stop():
-    """Release: fast stop over the stream app, then an ordered MCP `stop` after any in-flight drive."""
+    """Letting go of the pad: a plain stop that does NOT latch (that is what the STOP button is for). Fast over the
+    stream app, then an ordered speed-0 `drive` after any in-flight drive."""
     manual_stop["gen"] += 1
+    if halt["on"]:
+        return {"ok": True, "result": "already stopped: the emergency stop is active"}
     try:
         async with httpx.AsyncClient(timeout=3) as http:
-            await http.post(f"{ROBOT_STREAM_URL}/stop")
+            await http.post(f"{ROBOT_STREAM_URL}/release")
     except Exception:  # noqa: BLE001
         pass
     async with manual_lock:
-        return await robot_call("stop", {})
+        return await robot_call("drive", {"speed": 0, "seconds": 0.1, "steer_deg": 0, "wait": False})
 
 
 async def auto_call(tool, args):
     """Robot MCP call for the auto-mapper: same Teleport path and activity log as the agent, prefixed `auto:`."""
-    if halt["on"] and tool != "stop":
+    if halt["on"] and tool not in EXEMPT_WHEN_HALTED:
         return False, HALT_MSG
     t0 = time.time()
     try:
+        blocked = False
         async with streamablehttp_client(ROBOT_MCP_URL) as (r, w, _):
             async with ClientSession(r, w) as s:
                 await s.initialize()
-                res = await s.call_tool(tool, args)
+                if halt["on"] and tool not in EXEMPT_WHEN_HALTED:
+                    blocked = True
+                else:
+                    res = await s.call_tool(tool, args)
+        if blocked:
+            return False, HALT_MSG
         text = next((c.text for c in res.content if c.type == "text"), "")
         log_activity(tool, args, not res.isError, round((time.time() - t0) * 1000), "auto: " + text)
         return not res.isError, text
@@ -1044,12 +1091,18 @@ async def manual_look(req: Request):
     return await robot_call("look", {"pan_deg": int(b.get("pan_deg", 0)), "tilt_deg": int(b.get("tilt_deg", 0))})
 
 
+def robot_latched():
+    """The robot's own latch, as last polled: it shows an emergency stop pressed by another client too. Just after a
+    Resume the last poll can still be stale, so it is ignored for a moment."""
+    return bool(office_map.telemetry.get("halted")) and time.time() - (halt.get("cleared") or 0) > 1.5
+
+
 @app.get("/api/state")
 async def state():
     return {"telemetry": dict(office_map.telemetry), "grid": office_map.encoded(), "grid_size": GRID,
             "cell_cm": CELL_CM, "tally": tally(), "map": office_map.summary(), "auto": auto_mapper.status,
             "landmarks": office_map.landmarks, "hazards": office_map.hazards[-5:], "loaded_map": office_map.loaded,
-            "vision": vision, "halted": halt["on"]}
+            "vision": vision, "halted": halt["on"] or robot_latched()}
 
 
 @app.get("/api/video")

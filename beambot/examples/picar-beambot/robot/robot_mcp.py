@@ -2,18 +2,24 @@
 BeamBot robot server — runs ON the PiCar-X (Raspberry Pi).
 
 One process, two ports on 127.0.0.1, so Teleport can grant them separately:
-  :8765  /mcp          Streamable-HTTP MCP server (drive, look, stop, snapshot, get_telemetry, say)
+  :8765  /mcp          Streamable-HTTP MCP server (drive, look, stop, resume, snapshot, get_telemetry, say)
                        published as the MCP app `picar-mcp`; Teleport filters its tools per role
   :8766  /video.mjpg   Live MJPEG camera stream          (for the Beam app's VIDEO panel)
          /snapshot.jpg  One JPEG frame
          /telemetry    JSON: pose, ultrasonic, grayscale  (for the DATA + OFFICE MAP panels)
-         /stop         POST: stop the motors (the only thing here that acts)
+         /stop         POST: emergency stop. Stops the motors AND latches: `drive` is refused until /resume
+         /resume       POST: clear the latch (a deliberate act: give this app only to the dashboard's beam)
+         /release      POST: plain stop that does not latch (drive-pad release, end of an auto-map run)
                        published as the plain HTTP app `picar-stream`. There is deliberately no /mcp here:
                        `mcp.tools` in a Teleport role only filters MCP apps, so anything on this port is
                        reachable by whoever may open the app. It can watch and stop, never drive.
 
 Teleport's Application Service on the Pi publishes both ports into the cluster.
 Nothing listens on a public interface.
+
+The emergency stop is a latch that lives HERE, on the robot, not in whichever client pressed STOP: a drive request
+that was already on the wire, or one from a different client (Claude Code in another beam), is refused too. Only
+/resume or the `resume` tool clears it, and the default viewer/driver roles do not grant that tool.
 
 Safety on the robot, whoever calls: speed and duration are clamped, forward motion needs a fresh valid
 ultrasonic reading, every drive stops at its own deadline, the control loop survives hardware errors
@@ -123,6 +129,7 @@ class Robot:
         self.last_event = "ready"
         self.distance_ok_at = 0.0   # when the ultrasonic last gave a valid (> 0) reading
         self.need_stop = False      # a stop was requested but the hardware call failed: retry every pass
+        self.halted = False         # emergency-stop latch: drive is refused until resume()
 
         if SIMULATE:
             self.car = SimCar()
@@ -288,6 +295,8 @@ class Robot:
         seconds = max(0.1, min(MAX_DRIVE_SECONDS, float(seconds)))
         steer = max(-MAX_STEER_DEG, min(MAX_STEER_DEG, int(steer)))
         with self.lock:
+            if self.halted:
+                return "refused: emergency stop is latched; resume it (dashboard Resume) before driving"
             if speed > 0:
                 why = self._forward_blocked(time.time())
                 if why:
@@ -341,9 +350,24 @@ class Robot:
         return f"camera pan={pan} tilt={tilt}"
 
     def emergency_stop(self):
+        """Stop the motors and latch. The latch is set first, so it holds even if the hardware stop fails
+        (the control loop keeps retrying the stop)."""
         with self.lock:
+            self.halted = True
             self._stop("emergency stop")
         return "stopped"
+
+    def release(self):
+        """A plain stop that does not latch: letting go of the drive pad, the end of an auto-map run."""
+        with self.lock:
+            self._stop("released")
+        return "stopped"
+
+    def resume(self):
+        with self.lock:
+            self.halted = False
+            self.last_event = "resumed after emergency stop"
+        return "resumed"
 
     def say(self, text):
         text = re.sub(r"[^\w ,.!?'-]", "", str(text))[:120].strip() or "hello"
@@ -384,6 +408,7 @@ class Robot:
                 "grayscale": self.grayscale,
                 "camera": {"pan": self.pan, "tilt": self.tilt},
                 "moving": self.speed != 0,
+                "halted": self.halted,
                 "speed": self.speed,
                 "steer": self.steer,
                 "last_event": self.last_event,
@@ -417,8 +442,15 @@ async def look(pan_deg: int = 0, tilt_deg: int = 0) -> str:
 
 @mcp.tool()
 def stop() -> str:
-    """Stop all motion immediately."""
-    return robot.emergency_stop()
+    """Emergency stop: stop all motion now and refuse `drive` until a human resumes. `drive` already ends by
+    itself, so only call this to abort a move, not to finish one."""
+    return robot.emergency_stop() + " (latched: drive is refused until resumed)"
+
+
+@mcp.tool()
+def resume() -> str:
+    """Clear the emergency-stop latch so `drive` works again. Not part of the default viewer or driver roles."""
+    return robot.resume()
 
 
 @mcp.tool()
@@ -469,7 +501,15 @@ async def video_route(request: Request):
 
 
 async def stop_route(request: Request):
-    return JSONResponse({"result": robot.emergency_stop()})
+    return JSONResponse({"result": robot.emergency_stop(), "halted": True})
+
+
+async def release_route(request: Request):
+    return JSONResponse({"result": robot.release()})
+
+
+async def resume_route(request: Request):
+    return JSONResponse({"result": robot.resume(), "halted": False})
 
 
 stream_app = Starlette(routes=[
@@ -477,6 +517,8 @@ stream_app = Starlette(routes=[
     Route("/snapshot.jpg", snapshot_route, methods=["GET"]),
     Route("/video.mjpg", video_route, methods=["GET"]),
     Route("/stop", stop_route, methods=["POST"]),
+    Route("/release", release_route, methods=["POST"]),
+    Route("/resume", resume_route, methods=["POST"]),
 ])
 
 

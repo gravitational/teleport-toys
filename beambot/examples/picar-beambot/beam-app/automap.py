@@ -51,6 +51,10 @@ FREE, UNKNOWN, OCC = -1, 0, 1
 NEIGHBORS = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
 
 
+# A plain stop that does not latch the robot's emergency stop (the `stop` tool does, and needs a human to resume):
+# a speed-0 drive. Used when a run ends, is cancelled with the Stop auto-map button, or fails.
+HALT_MOTORS = {"speed": 0, "seconds": 0.1, "steer_deg": 0, "wait": False}
+
 class Stuck(RuntimeError):
     pass
 
@@ -456,14 +460,14 @@ class AutoMapper:
                 stalled += 1
         except asyncio.CancelledError:
             st.update(state="stopped", path_cm=[])
-            await call_tool("stop", {})
+            await call_tool("drive", HALT_MOTORS)
             raise
         except Stuck as e:
             st.update(state="stuck", detail=str(e), path_cm=[])
-            await call_tool("stop", {})
+            await call_tool("drive", HALT_MOTORS)
         except Exception as e:  # noqa: BLE001
             st.update(state="error", detail=f"{e.__class__.__name__}: {e}", path_cm=[])
-            await call_tool("stop", {})
+            await call_tool("drive", HALT_MOTORS)
         finally:
             st["ended"] = time.time()
             self._note(f"{st['state']}: {st.get('detail', '')}".rstrip(": "))

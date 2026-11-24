@@ -11,7 +11,7 @@ import time
 import httpx
 import pytest
 
-ROBOT_TOOLS = {"drive", "look", "stop", "snapshot", "get_telemetry", "say"}
+ROBOT_TOOLS = {"drive", "look", "stop", "resume", "snapshot", "get_telemetry", "say"}
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -94,7 +94,7 @@ def test_agent_counts_objects_and_persists_them(app, llm):
 
 def test_agent_drives_the_robot(app, llm, robot):
     before = telemetry(robot)["pose"]
-    llm.script({"tool": "drive", "args": {"speed": 20, "seconds": 0.6}}, {"tool": "stop"}, {"text": "moved"})
+    llm.script({"tool": "drive", "args": {"speed": 20, "seconds": 0.6}}, {"tool": "get_telemetry"}, {"text": "moved"})
     job = app.chat("drive forward a little", task="map")
     assert job["status"] == "done"
     after = telemetry(robot)["pose"]
@@ -188,17 +188,21 @@ def test_manual_controls_go_through_the_same_mcp_tools(app, robot):
     assert telemetry(robot)["moving"] is False
     assert app.post("/api/look", json={"pan_deg": 0, "tilt_deg": 0}).json()["ok"]
     seen = {a["tool"]: a["detail"] for a in app.get("/api/beam").json()["activity"]}
-    assert {"look", "say", "drive", "stop"} <= set(seen) and all(v.startswith("manual:") for v in seen.values())
+    assert {"look", "say", "drive"} <= set(seen) and all(v.startswith("manual:") for v in seen.values())
 
 
 def test_emergency_stop_halts_the_robot(app, robot):
-    httpx.post(f"{robot.base}/stop")
+    httpx.post(f"{robot.base}/release")
     app.post("/api/drive", json={"speed": 20, "seconds": 3, "steer_deg": 0})
     time.sleep(0.3)
     assert telemetry(robot)["moving"] is True
-    assert app.post("/api/stop").status_code == 200
-    time.sleep(0.2)
-    assert telemetry(robot)["moving"] is False
+    try:
+        assert app.post("/api/stop").status_code == 200
+        time.sleep(0.2)
+        assert telemetry(robot)["moving"] is False and telemetry(robot)["halted"] is True
+    finally:
+        assert app.post("/api/resume").status_code == 200        # the robot is shared by the whole session
+    assert telemetry(robot)["halted"] is False
 
 
 # ----------------------------------------------------------------------------- maps
@@ -223,7 +227,7 @@ def test_auto_map_starts_and_stops(app):
     deadline = time.time() + 10
     while time.time() < deadline and app.get("/api/state").json()["auto"]["state"] in ("starting", "scanning", "stopping", "moving"):
         time.sleep(0.3)
-    httpx.post(f"{app.base_url}/api/stop")
+    httpx.post(f"{app.base_url}/api/drive/stop")      # a plain stop: the shared robot must not stay latched
 
 
 # ----------------------------------------------------------------------------- Redis feed

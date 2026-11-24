@@ -8,7 +8,7 @@ Run them **inside a beam** (or anywhere `tsh status` shows an active session):
 ```bash
 tsh beams add --roles picar-driver        # roles must be eligible for delegation
 tsh beams ssh <beam>
-git clone <this repo> && cd beams-one-click
+git clone <this repo> && cd beambot
 python3 -m pip install --user --break-system-packages -r tests/requirements.txt   # beams have no python3-venv
 PY=python3 make test-live
 ```

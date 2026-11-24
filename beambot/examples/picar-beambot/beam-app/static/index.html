@@ -457,7 +457,12 @@ async function estop() {
     add('bot', `STOP FAILED: ${j.error || j.detail || (r ? r.status : 'no answer')}. BeamBot is halted and will not send more commands, but the car may still be moving: cut its power.`);
   }
 }
-async function resume() { await post('/api/resume'); setHalted(false); add('bot', 'Resumed. BeamBot can move again.'); }
+async function resume() {
+  let r, j = {};
+  try { r = await post('/api/resume'); j = await readJson(r); } catch (e) { j = {error: e.message}; }
+  if (r && r.ok) { setHalted(false); add('bot', 'Resumed. BeamBot can move again.'); }
+  else add('bot', `Could not resume: ${j.error || j.detail || (r ? r.status : 'no answer')}. The robot stays stopped.`);
+}
 function setHalted(on) { $('resumeBtn').hidden = !on; }
 async function resetMap() { await post('/api/reset', {what:'map'}); }
 async function resetCounts() { await post('/api/reset', {what:'counts'}); }

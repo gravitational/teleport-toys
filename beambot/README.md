@@ -1,4 +1,4 @@
-# Beams One-Click 🤖🔌
+# BeamBot 🤖🔌
 
 **Give an AI agent real hands, and keep the leash in your own pocket.**
 
@@ -14,6 +14,16 @@ A [Teleport Beam](https://goteleport.com/docs/beams/) is a short-lived, isolated
                                                 ▼
                              robot  ──  MCP server bound to 127.0.0.1
 ```
+
+## About BeamBot
+
+BeamBot lets an AI agent operate a real robot car. The car is a battery-powered SunFounder PiCar-X built around a Raspberry Pi. An agent can plan a mission, drive the motors, read the distance sensor, and capture camera frames, but only through the tools an operator has approved.
+
+The agent runs in a [Teleport Beam](https://goteleport.com/docs/beams/), a short-lived, isolated runtime for AI agents with no secrets inside. The Beam calls the car's MCP server through Teleport, which checks each tool call against the operator's access rules and records it in an audit log. The car connects outward through a reverse tunnel, so it needs no inbound ports, no static IP, and no VPN.
+
+The pattern isn't specific to the PiCar-X. Any robot, drone, or edge device that can run an MCP server and an outbound Teleport agent can be added the same way. You expose its capabilities as MCP tools, name them with the same `sense_*` and `act_*` convention, and the agent and access rules stay the same. To adapt BeamBot to your hardware, replace the car's MCP server with one that wraps your device's functions, then update the tool list and access roles.
+
+See the [architecture diagram](docs/beambot-architecture.pdf) (PDF) for how a command flows from the operator to the car.
 
 ## What's in the box
 
@@ -102,6 +112,7 @@ examples/
   picar-beambot/           robot/ (MCP server, Teleport + systemd config), beam-app/ (dashboard), teleport/ (roles),
                            k8s/ (the simulated robot + Teleport agent for a Kubernetes cluster)
   advanced-simulation/     pi/ (five-role MCP server + installer), teleport/ (roles), beam/ (agent rules), tests/
+docs/                      beambot-architecture.pdf: how a command flows from operator to robot
 AGENTS.md                  how to work in this repo (CLAUDE.md points at it)
 Makefile                   `make test`
 ```

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for AI coding agents (and humans) working in **Beams One-Click**: a pack of scripts and
+Guidance for AI coding agents (and humans) working in **BeamBot**: a pack of scripts and
 examples that let an agent running in a Teleport Beam use Teleport-protected MCP servers, including ones
 that move real hardware. `CLAUDE.md` just points here.
 
