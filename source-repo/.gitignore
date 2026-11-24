@@ -1,0 +1,39 @@
+# --- build / runtime, regenerate with bin/setup.sh ---
+venv/
+gen/
+__pycache__/
+*.pyc
+
+# --- runtime state ---
+run/
+ca/
+
+# --- DELIBERATELY NOT COMMITTED ---------------------------------------------
+# Copies of the live tbot identity file. These contain the beam's SSH and X.509
+# certificates (and the owner's email, roles and login IP). No private key can
+# be in them -- the beam key is non-exportable -- but they are credential files,
+# they trip secret scanners on the "BEGIN PIV YUBIKEY PRIVATE KEY" header, and
+# the certs expire 61 minutes after issue anyway. Reproduce with
+# bin/watch-renewal.py.
+archive/
+inventory/
+
+# Throwaway CA and user keys minted by the test scripts. Globbed, not
+# enumerated: an explicit list missed exp-multitenant/ and staged its private
+# keys, which is the same mistake that once shipped exp5/ to a Beam. The test
+# scripts regenerate these on every run; never commit private keys, even
+# disposable ones.
+exp*/
+testkeys/
+
+# Nested git repositories created by the experiments.
+repos/
+
+# runtime log of the ssh-agent shim
+logs/agent.log
+
+# Local Claude Code settings
+.claude/
+
+# npm dev dependencies for the extension test suite (jsdom).
+node_modules/
