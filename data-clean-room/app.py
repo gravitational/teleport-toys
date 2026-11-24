@@ -727,6 +727,8 @@ Hard rules (a privacy gate will reject your output if you break them):
   "n" (how many people it is based on). Don't write phrases like
   "only one", "a single", "the only", "3 people", "1 in 4", "3 of 14" or
   "one of the"; use percentages instead.
+- Never give a number of people in any field, including next_step: write
+  "recent leavers", not "three recent leavers" or "a few recent leavers".
 - For M2, call it "very small teams" (managers with 1 or 2 direct reports);
   don't count or describe specific teams.
 - Don't name or describe teams, job families, levels or locations inside an
@@ -867,23 +869,27 @@ def use_phase_toolkit(worker):
     if stale:
         # Fail closed: an older metrics script may not apply today's privacy rules.
         worker.image = f"{PHASE} (Phase, OUT OF DATE: {', '.join(stale)})"
-        raise RuntimeError(f"The {PHASE} image is out of date: {', '.join(stale)} differ from this repo, "
+        raise RuntimeError(f"The {PHASE} image is out of date: {', '.join(stale)} "
+                           f"{'differs' if len(stale) == 1 else 'differ'} from this repo, "
                            "so nothing was computed or released. Rebuild it with: tsh phase apply -f phase.yaml")
     worker.image = f"{PHASE} (Phase, toolkit matches repo)"
 
 
 def playbook_flow(worker, dataset, emit):
     from_database = DATA_SOURCE == "database" and not LOCAL
+    phase = PHASE and not LOCAL
+    if phase:
+        # Check the image first, so a stale image stops the run before any data
+        # enters the Beam. This also creates the run folder.
+        emit("status", f"Using the playbook and metrics script built into the {PHASE} image...")
+        use_phase_toolkit(worker)
     if from_database:
         emit("status", f"Pulling the no-names view from {DB_NAME_TELEPORT} through Teleport, inside the beam...")
         pull_from_database(worker)
     else:
         emit("status", "Copying the raw people data into the beam...")
         worker.put(os.path.join(DATA_DIR, dataset["csv"]), "people_coded.csv")
-    if PHASE and not LOCAL:
-        emit("status", f"Using the playbook and metrics script built into the {PHASE} image...")
-        use_phase_toolkit(worker)
-    else:
+    if not phase:
         emit("status", "Copying the playbook and metrics script into the beam...")
         worker.put(os.path.join(WORKER_DIR, "playbook.md"), "playbook.md")
         worker.put(os.path.join(WORKER_DIR, "compute_metrics.py"), "compute_metrics.py")
@@ -1071,6 +1077,8 @@ def run_job(dataset, send):
     except Exception as exc:
         if "privacy gate" in str(exc):
             outcome = "blocked by privacy gate, nothing released"
+        elif "OUT OF DATE" in worker.image:   # set only by use_phase_toolkit's stale-image stop
+            outcome = "stopped: worker image out of date"
         msg = str(exc)
         if gate_hits(msg, strict=True):
             # Error text can carry what the agent or a beam command printed
