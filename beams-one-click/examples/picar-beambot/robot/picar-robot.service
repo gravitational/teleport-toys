@@ -1,0 +1,15 @@
+# sudo cp picar-robot.service /etc/systemd/system/ && sudo systemctl enable --now picar-robot
+[Unit]
+Description=BeamBot PiCar-X MCP + stream server
+After=network-online.target
+
+[Service]
+User=root
+WorkingDirectory=/home/pi/picar-beambot/robot
+ExecStart=/usr/bin/python3 /home/pi/picar-beambot/robot/robot_mcp.py
+Restart=on-failure
+Environment=MAX_SPEED=40
+Environment=OBSTACLE_STOP_CM=20
+
+[Install]
+WantedBy=multi-user.target

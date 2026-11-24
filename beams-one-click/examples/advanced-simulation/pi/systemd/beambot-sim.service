@@ -1,0 +1,24 @@
+[Unit]
+Description=BeamBot robot MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robot
+Group=robot
+SupplementaryGroups=robohw video
+EnvironmentFile=/etc/beambot-sim.env
+WorkingDirectory=/opt/beambot-sim
+ExecStart=/opt/beambot-sim/venv/bin/python -m robot_mcp
+Restart=always
+RestartSec=2
+# Pi 3 has 1 GB; keep the server small and the Teleport agent happy
+MemoryMax=250M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

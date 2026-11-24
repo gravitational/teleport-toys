@@ -1,0 +1,22 @@
+# Values for the teleport-kube-agent chart: Application Service only, publishing the simulated robot.
+# deploy.sh adds proxyAddr and creates the join-token Secret; nothing secret lives in this file.
+roles: app
+enterprise: true                 # Teleport Cloud / Enterprise cluster (Beams clusters are)
+joinParams:
+  method: token
+  tokenName: ""                  # the token comes from the Secret below
+joinTokenSecret:
+  create: false
+  name: picar-sim-join-token     # key: auth-token
+apps:
+  # MCP tools: drive, look, stop, snapshot, get_telemetry, say. Teleport labels it an MCP app on its own,
+  # which is what the built-in `mcp-user` role matches.
+  - name: picar-mcp
+    uri: "mcp+http://picar-sim.picar-sim.svc.cluster.local:8765/mcp"
+    labels:
+      project: picar-beambot
+  # Live video + telemetry for the dashboard (optional)
+  - name: picar-stream
+    uri: "http://picar-sim.picar-sim.svc.cluster.local:8765"
+    labels:
+      project: picar-beambot

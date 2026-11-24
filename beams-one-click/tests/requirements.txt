@@ -1,0 +1,13 @@
+mcp>=1.9,<2
+uvicorn
+pillow
+fastapi
+httpx
+anthropic
+psycopg[binary]
+redis
+fakeredis>=2.26          # TCP fake Redis server, so the app is tested over a real socket
+pixeltable-pgserver      # embedded real Postgres for the database tests (tests skip without it)
+pytest
+pytest-timeout
+pyyaml

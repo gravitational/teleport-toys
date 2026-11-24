@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BeamBot Control · Teleport Beams</title>
+<!-- Brand type: Lato. Icons: Phosphor. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700;900&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/@phosphor-icons/web@2.1.1"></script>
+<style>
+  /* palette */
+  :root {
+    --brand:#512FC9; --p100:#EFF1FE; --p200:#C8C8FF; --p300:#A6A2FF; --p400:#8879FF;
+    --p500:#3A2095; --p600:#241264; --p700:#130833;
+    --g100:#F0F2F4; --g200:#CFD8DC; --g300:#607D8B; --g400:#324148;
+    --teal:#4CEAF5; --red:#FF5731; --green:#169984; --violet:#651FFF;
+    --bg:var(--p700); --panel:#1b0d4a; --line:var(--p500); --text:var(--p100); --muted:var(--p300);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:400 14px/1.5 Lato, system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; }
+  .ph { font-size:24px; line-height:1; }
+  button { font:inherit; color:var(--text); background:transparent; border:1px solid var(--line); border-radius:8px; padding:7px 14px; cursor:pointer; display:inline-flex; align-items:center; gap:8px; }
+  button:hover { border-color:var(--p400); }
+  button.primary { background:var(--brand); border-color:var(--brand); font-weight:700; }
+  button.primary:hover { background:var(--p400); border-color:var(--p400); }
+  button.stop { background:var(--red); border-color:var(--red); color:#fff; font-weight:900; letter-spacing:.5px; }
+
+  /* header: brand purple gradient */
+  header { display:flex; align-items:center; gap:14px; padding:12px 20px; background:linear-gradient(90deg, var(--p700) 0%, var(--p600) 55%, var(--brand) 100%); border-bottom:1px solid var(--p500); }
+  header .divider { width:1px; height:26px; background:var(--p400); opacity:.5; }
+  header h1 { font-size:18px; font-weight:900; margin:0; letter-spacing:.2px; }
+  .pill { font-size:12px; font-weight:700; padding:3px 10px; border-radius:999px; background:var(--p100); color:var(--brand); }
+  .pill.warn { background:transparent; color:var(--teal); border:1px solid var(--teal); }
+  header .spacer { flex:1; }
+  .status-dot { width:10px; height:10px; border-radius:50%; background:var(--g300); }
+  .status-dot.ok { background:var(--green); box-shadow:0 0 0 3px #16998433; } .status-dot.bad { background:var(--red); }
+
+  [hidden] { display:none !important; }
+
+  /* Tabs: Control (chat/video/data/map) | Beams (feature cards) */
+  .tabs { display:flex; gap:4px; padding:3px; border-radius:10px; background:#00000033; border:1px solid var(--p500); }
+  .tabs button { border:0; padding:5px 14px; border-radius:7px; font-weight:700; color:var(--p200); }
+  .tabs button.on { background:var(--p100); color:var(--brand); }
+  .tabs button .count { font-size:11px; font-weight:900; padding:0 6px; border-radius:999px; background:var(--brand); color:#fff; }
+  .tabs button.on .count { background:var(--brand); }
+
+  /* Beams tab */
+  #beamsView { flex:1; overflow-y:auto; padding:4px 20px 20px; }
+  #beamsView .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(380px, 1fr)); gap:12px; align-items:start; }
+  #beamsView .sec .strip { font-size:12px; color:var(--muted); margin:-2px 0 8px; }
+  #beamsView .sec .strip b { color:var(--text); }
+
+  main { flex:1; display:grid; grid-template-columns:minmax(330px, 1fr) 1.6fr; gap:12px; padding:12px 20px 16px; min-height:0; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; display:flex; flex-direction:column; min-height:0; overflow:hidden; }
+  .panel > h2 { font-size:12px; font-weight:900; text-transform:uppercase; letter-spacing:1.2px; color:var(--p200); margin:0; padding:10px 14px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .panel > h2 button { padding:3px 10px; font-size:12px; text-transform:none; letter-spacing:0; font-weight:400; }
+
+  /* chat */
+  .tasks { display:flex; gap:6px; }
+  .tasks button { padding:4px 10px; font-size:12px; text-transform:none; letter-spacing:0; font-weight:700; border-radius:999px; }
+  .tasks button.on { background:var(--brand); border-color:var(--brand); }
+  .tasks .ph { font-size:16px; }
+  #log { flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:92%; padding:9px 12px; border-radius:10px; white-space:pre-wrap; font-weight:400; }
+  .msg.user { align-self:flex-end; background:var(--brand); color:#fff; }
+  .msg.bot { align-self:flex-start; background:var(--p600); border:1px solid var(--p500); }
+  .msg.err { border-color:var(--red); }
+  .trace { margin-top:8px; display:flex; flex-direction:column; gap:3px; }
+  .trace div { font:12px ui-monospace, Menlo, monospace; color:var(--p300); }
+  .trace .via { font:700 10px Lato, sans-serif; padding:1px 6px; border-radius:4px; background:var(--p100); color:var(--brand); margin-right:6px; }
+  .trace .via.local { background:transparent; color:var(--p300); border:1px solid var(--p500); }
+  .autobar { margin:0 14px 10px; padding:12px; border-radius:12px; border:1px solid var(--p500); background:var(--p700); display:grid; grid-template-columns:auto 1fr; gap:4px 12px; align-items:center; }
+  .autobar[hidden] { display:none; }
+  .autobar .go { grid-row:span 2; padding:10px 16px; font-weight:900; border-radius:10px; }
+  .autobar .go.running { background:var(--red); border-color:var(--red); }
+  .autobar .st { font-weight:700; }
+  .autobar .st .pulse { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--teal); margin-right:6px; animation:pulse 1.2s infinite; }
+  .autobar .hint { font-size:12px; color:var(--muted); }
+  .autobar .opts { grid-column:1/-1; display:flex; gap:14px; flex-wrap:wrap; align-items:center; font-size:12px; color:var(--p200); }
+  .autobar .opts label { display:flex; gap:6px; align-items:center; }
+  .autobar .opts input[type=number] { width:58px; background:var(--p700); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 6px; font:inherit; font-size:12px; }
+  .autobar .opts input[type=range] { width:90px; }
+  .autobar[data-running] .opts { opacity:.45; pointer-events:none; }
+  .hrow { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .loaded { font-size:11px; color:var(--teal); font-weight:700; }
+  .maps div { display:flex; justify-content:space-between; gap:8px; font-size:12px; color:var(--p200); padding:3px 0; border-bottom:1px solid #3a209555; }
+  .maps button { padding:2px 8px; font-size:11px; }
+  @keyframes pulse { 50% { opacity:.25; } }
+  .loglist div { font:12px ui-monospace, Menlo, monospace; color:var(--p200); padding:2px 0; border-bottom:1px solid #3a209555; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; padding:0 14px 10px; }
+  .chips button { font-size:12px; padding:5px 11px; border-radius:999px; }
+  form { display:flex; gap:8px; padding:12px 14px; border-top:1px solid var(--line); }
+  form input { flex:1; background:var(--p700); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:9px 12px; font:inherit; }
+  form input:focus { outline:none; border-color:var(--p400); }
+
+  /* right side */
+  .right { display:grid; grid-template-rows:minmax(210px, .9fr) 1.3fr; gap:12px; min-height:0; }
+  .top { display:grid; grid-template-columns:1.2fr 1fr; gap:12px; min-height:0; }
+  #video { flex:1; width:100%; min-height:0; object-fit:contain; background:#000; }
+  /* manual drive: pads float over the video */
+  .vidwrap { flex:1; position:relative; min-height:0; display:flex; }
+  .pad { position:absolute; bottom:6px; opacity:.85; display:grid; grid-template-columns:repeat(3, 28px); grid-auto-rows:28px; gap:3px; padding:5px; border-radius:10px; background:#130833b3; touch-action:none; user-select:none; }
+  .pad.drive { right:8px; } .pad.cam { left:8px; }
+  .pad button { padding:0; justify-content:center; border-radius:7px; background:#241264cc; }
+  .pad button .ph { font-size:16px; }
+  .pad button.on { background:var(--brand); border-color:var(--p300); }
+  .pad .lbl { grid-column:1/-1; font:700 10px Lato, sans-serif; letter-spacing:.8px; color:var(--p200); text-align:center; align-self:center; }
+  .pad input[type=range] { grid-column:1/-1; width:100%; accent-color:var(--brand); margin:0; }
+  .drivehint { font-size:11px; font-weight:400; text-transform:none; letter-spacing:0; color:var(--muted); }
+  .data { padding:12px 14px; overflow-y:auto; display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:12px; align-content:start; }
+  .stat .k { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; }
+  .stat .v { font-size:24px; font-weight:300; font-variant-numeric:tabular-nums; }
+  .wide { grid-column:1/-1; }
+  .wide .k { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; margin-bottom:4px; }
+  .bars div.row { display:grid; grid-template-columns:90px 1fr 34px; align-items:center; gap:8px; margin:4px 0; }
+  .bars .bar { height:8px; border-radius:4px; background:linear-gradient(90deg, var(--brand), var(--p400)); }
+  .bars .n { text-align:right; font-weight:700; font-variant-numeric:tabular-nums; }
+  .recs div { font-size:12px; color:var(--p200); padding:3px 0; border-bottom:1px solid #3a209555; }
+  .empty { color:var(--muted); font-size:13px; }
+  .event { font-size:12px; color:var(--muted); }
+  #mapwrap { flex:1; position:relative; min-height:0; }
+  #map { position:absolute; inset:0; width:100%; height:100%; }
+  .autostat { position:absolute; left:10px; top:8px; font-size:12px; color:var(--p100); background:#130833cc; padding:4px 8px; border-radius:6px; }
+  .autostat:empty { display:none; }
+  .legend { position:absolute; left:10px; bottom:8px; font-size:11px; color:var(--p200); background:#130833cc; padding:4px 8px; border-radius:6px; }
+
+  /* Beams drawer */
+  #drawer { position:fixed; top:0; right:0; bottom:0; width:min(460px, 100%); background:var(--p700); border-left:1px solid var(--p500); box-shadow:-20px 0 40px #00000066; transform:translateX(105%); transition:transform .25s; display:flex; flex-direction:column; z-index:10; }
+  #drawer.open { transform:none; }
+  #drawer header { background:linear-gradient(135deg, var(--p600), var(--brand)); }
+  #drawer .body { flex:1; overflow-y:auto; padding:6px 18px 18px; }
+  .sec { padding:14px; margin-top:12px; border-radius:12px; border:1px solid var(--p500); background:var(--panel); transition:border-color .2s, box-shadow .2s; }
+  .sec.focus { border-color:var(--teal); box-shadow:0 0 0 2px #4CEAF533; }
+  .sec h3 { margin:0 0 4px; font-size:16px; font-weight:900; display:flex; align-items:center; gap:8px; }
+  .sec h3 .ph { color:var(--p300); }
+  .sec .say { font-weight:300; font-size:15px; color:var(--p100); margin:0 0 10px; }
+  .kv { display:grid; grid-template-columns:130px 1fr; gap:4px 10px; font-size:13px; }
+  .kv .k { color:var(--muted); }
+  .kv .v { font-weight:700; word-break:break-all; }
+  .ok { color:var(--green); } .bad { color:var(--red); }
+  .tools { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  .tool { font:700 12px ui-monospace, Menlo, monospace; padding:4px 8px; border-radius:6px; display:inline-flex; align-items:center; gap:5px; }
+  .tool.allow { background:#16998426; color:#5fe0c9; border:1px solid var(--green); }
+  .tool.deny { background:transparent; color:var(--g300); border:1px dashed var(--g300); text-decoration:line-through; }
+  .tool .ph { font-size:14px; }
+  .acts { max-height:170px; overflow-y:auto; font:12px ui-monospace, Menlo, monospace; }
+  .acts div { padding:3px 0; border-bottom:1px solid #3a209555; color:var(--p200); }
+  pre { background:var(--p700); border:1px solid var(--p500); border-radius:8px; padding:10px; font-size:12px; overflow-x:auto; color:var(--p200); margin:8px 0 0; }
+  .sec a { color:var(--teal); }
+  .tourbar { display:flex; gap:8px; align-items:center; padding:12px 18px; border-top:1px solid var(--p500); }
+  .tourbar .spacer { flex:1; }
+  .tourbar .step { color:var(--muted); font-size:12px; }
+
+  @media (max-width: 1000px) {
+    #beamsView .grid { grid-template-columns:1fr; }
+    main { grid-template-columns:1fr; overflow-y:auto; align-content:start; }
+    .right, .top { display:flex; flex-direction:column; flex:none; min-height:auto; }
+    .top > .panel { height:280px; flex:none; } .right > .panel { height:420px; flex:none; }
+    section.panel:first-child { height:520px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>BeamBot Control</h1>
+  <span class="pill" id="runtimePill">Running on Teleport Beams</span>
+  <span class="status-dot" id="dot" title="Robot connection"></span>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="control" onclick="setTab('control')"><i class="ph ph-game-controller"></i> Control</button>
+    <button role="tab" data-tab="beams" onclick="setTab('beams')"><i class="ph ph-cube"></i> Beams <span class="count" id="beamsCount"></span></button>
+  </nav>
+  <span class="spacer"></span>
+  <button class="primary" onclick="startTour()"><i class="ph ph-play-circle"></i> Tour Beams features</button>
+  <button class="stop" onclick="estop()"><i class="ph ph-hand-palm"></i> STOP</button>
+</header>
+
+<div id="beamsView" hidden><div class="grid" id="beamGrid"></div></div>
+
+<main id="controlView">
+  <section class="panel">
+    <h2><span>Chat</span><span class="tasks" id="tasks"></span></h2>
+    <div id="log"></div>
+    <div class="autobar" id="autoBar" hidden>
+      <button class="primary go" id="autoGo" onclick="toggleAuto()"></button>
+      <div class="st" id="autoBarSt"></div>
+      <div class="hint">Frontier exploration, no LLM driving: scan, drive to the nearest unexplored edge, repeat until the map closes. Every move is a Teleport MCP <code>drive</code> call. The camera + vision model only label landmarks and hazards. Drive pad, chat drive, or STOP takes over.</div>
+      <div class="opts" id="autoOpts">
+        <label>Speed <input type="range" id="autoSpeed" min="15" max="40" value="30" oninput="$('autoSpeedV').textContent=this.value"><b id="autoSpeedV">30</b></label>
+        <label>Max moves <input type="number" id="autoMoves" min="10" max="2000" value="300"></label>
+        <label>Max minutes <input type="number" id="autoMins" min="1" max="60" value="15"></label>
+        <label><input type="checkbox" id="autoVision" checked> Camera landmarks + hazards</label>
+      </div>
+    </div>
+    <div class="chips" id="chips"></div>
+    <form id="f"><input id="q" placeholder="Ask BeamBot…" autocomplete="off"><button class="primary">Send</button></form>
+  </section>
+
+  <section class="right">
+    <div class="top">
+      <div class="panel"><h2><span>Video</span><span class="hrow"><span class="drivehint" id="driveMsg">WASD / arrows drive · IJKL camera · C center</span><button id="sayBtn" onclick="sayHello()" title="Robot speaker: the say MCP tool through Teleport"><i class="ph ph-speaker-high"></i> Say hello</button></span></h2>
+        <div class="vidwrap"><img id="video" alt="Robot camera">
+          <div class="pad cam" aria-label="Camera">
+            <span class="lbl">CAMERA</span>
+            <span></span><button data-cam="up" title="Tilt up (I)"><i class="ph ph-caret-up"></i></button><span></span>
+            <button data-cam="left" title="Pan left (J)"><i class="ph ph-caret-left"></i></button>
+            <button data-cam="center" title="Center (C)"><i class="ph ph-crosshair"></i></button>
+            <button data-cam="right" title="Pan right (L)"><i class="ph ph-caret-right"></i></button>
+            <span></span><button data-cam="down" title="Tilt down (K)"><i class="ph ph-caret-down"></i></button><span></span>
+          </div>
+          <div class="pad drive" aria-label="Drive">
+            <span class="lbl">DRIVE · SPEED <span id="spdv">25</span></span>
+            <input type="range" id="spd" min="10" max="40" step="5" value="25" oninput="$('spdv').textContent=this.value">
+            <span></span><button data-m="fwd" title="Forward (W / ↑)"><i class="ph ph-arrow-up"></i></button><span></span>
+            <button data-m="left" title="Forward left (A / ←)"><i class="ph ph-arrow-up-left"></i></button>
+            <button data-m="stop" title="Stop (space)"><i class="ph ph-stop"></i></button>
+            <button data-m="right" title="Forward right (D / →)"><i class="ph ph-arrow-up-right"></i></button>
+            <span></span><button data-m="back" title="Reverse (S / ↓)"><i class="ph ph-arrow-down"></i></button><span></span>
+          </div>
+        </div></div>
+      <div class="panel">
+        <h2><span id="dataTitle">Data</span><button onclick="resetCounts()">Clear counts</button></h2>
+        <div class="data" id="data"></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Office map <span class="hrow"><span class="loaded" id="loadedMap"></span><button id="autoBtn" onclick="toggleAuto()"><i class="ph ph-path"></i> Auto-map</button><button onclick="saveMap()" title="Store the grid + landmarks in the database through Teleport"><i class="ph ph-floppy-disk"></i> Save map</button><button onclick="downloadMap()" title="Download the map as a PNG"><i class="ph ph-download-simple"></i> PNG</button><button onclick="resetMap()">Reset map</button></span></h2>
+      <div id="mapwrap"><canvas id="map"></canvas>
+        <div class="autostat" id="autoStat"></div>
+        <div class="legend"><span style="color:#EFF1FE">■</span> obstacle &nbsp; <span style="color:#3A2095">■</span> explored &nbsp; <span style="color:#4CEAF5">●</span> count &nbsp; <span style="color:#8879FF">▲</span> BeamBot &nbsp; <span style="color:#4CEAF5">▪</span> frontier &nbsp; <span style="color:#FFB020">▲</span> landmark &nbsp; <span style="color:#FF5731">○</span> hazard &nbsp; grid 50 cm</div></div>
+    </div>
+  </section>
+</main>
+
+<aside id="drawer">
+  <header><i class="ph ph-cube" style="color:#fff"></i><h1 style="font-size:16px">How BeamBot runs on Teleport Beams</h1><span class="spacer"></span><button onclick="closeDrawer()" aria-label="Close"><i class="ph ph-x"></i></button></header>
+  <div class="body" id="drawerBody"></div>
+  <div class="tourbar" id="tourbar" hidden>
+    <span class="step" id="stepLabel"></span><span class="spacer"></span>
+    <button onclick="tourStep(-1)"><i class="ph ph-caret-left"></i> Back</button>
+    <button class="primary" id="nextBtn" onclick="tourStep(1)">Next <i class="ph ph-caret-right"></i></button>
+  </div>
+</aside>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const readJson = async r => { const t = await r.text(); try { return JSON.parse(t); } catch { return {detail: t.slice(0, 200) || r.statusText}; } };
+const post = (u, b) => fetch(u, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b || {})});
+const log = $('log');
+let TASKS = {}, task = 'count', busy = false, S = null, B = null;
+
+/* ---------------- Beams features: one definition drives the strip, the drawer, and the tour ---------------- */
+const FEATURES = [
+  { id:'runtime', icon:'ph-cube', title:'Isolated runtime',
+    say:'BeamBot\'s agent runs in its own short-lived microVM. It expires on its own, after 12 hours by default.',
+    strip: b => `<b>${esc(b.runtime.beam)}</b>${b.runtime.expires ? ' · expires ' + esc(b.runtime.expires) : ''}`,
+    body: b => kv([['Beam', b.runtime.beam], ['Expires', b.runtime.expires || '12 h by default'],
+                   ['Running in a beam', b.runtime.inside_beam ? yes('yes') : no('not detected')]]) },
+  { id:'identity', icon:'ph-identification-badge', title:'Identity, not secrets',
+    say:'The beam acts with your Teleport identity, delegated for this session. Model keys stay with Teleport: OpenAI and Anthropic calls go to Teleport endpoints.',
+    strip: b => { const n = b.secrets.env_names.length + b.secrets.files.length;
+                  return `<b>${esc(b.identity.user || 'identity')}</b> · ${n === 0 ? '0 secrets found' : n + ' to review'}`; },
+    body: b => kv([['Acting as', b.identity.user || '(tsh status unavailable)'], ['Roles', (b.identity.roles || []).join(', ') || '–'],
+                   ['Cert valid until', b.identity.valid_until || '–'],
+                   ['OpenAI endpoint', b.secrets.endpoints.openai ? yes(b.secrets.endpoints.openai + ' (Teleport)') : no('not via Teleport')],
+                   ['Anthropic endpoint', b.secrets.endpoints.anthropic ? yes(b.secrets.endpoints.anthropic + ' (Teleport)') : no('not via Teleport')],
+                   ['Credential scan', (b.secrets.env_names.length + b.secrets.files.length) === 0 ? yes('0 credential env vars or files')
+                       : no([...b.secrets.env_names, ...b.secrets.files].join(', '))],
+                   ...(b.secrets.teleport_managed.length ? [['Teleport-managed', b.secrets.teleport_managed.join(', ')]] : [])]) +
+                `<div class="event" style="margin-top:8px">Scans environment variable names and common credential files. Values are never read or shown. Model API keys on the beam are placeholders: Teleport's inference proxy adds the real credentials after traffic leaves the beam.</div>` },
+  { id:'inference', icon:'ph-brain', title:'Inference through Teleport',
+    say:'Model requests go through Teleport\'s inference proxy, which adds credentials after traffic leaves the beam.',
+    strip: b => `<b>${b.inference_stats.calls}</b> ${b.inference.label} calls · ${b.inference_stats.avg_ms ? b.inference_stats.avg_ms + ' ms avg' : 'ready'}`,
+    body: b => kv([['Endpoint', b.inference.endpoint_host], ['Model', b.inference.model], ['Via beam proxy', b.inference.via_beam_proxy ? yes('yes') : no('no')],
+                   ['Calls this session', b.inference_stats.calls], ['Avg latency', b.inference_stats.avg_ms ? b.inference_stats.avg_ms + ' ms' : '–'],
+                   ['Errors', b.inference_stats.errors]]) },
+  { id:'mcp', icon:'ph-plugs-connected', title:'Robot access over MCP',
+    say:'The robot is an MCP server behind Teleport. Your role decides which tools the agent gets, and every request is recorded in the audit log.',
+    strip: b => `<b>${b.mcp.allowed.length}/${b.mcp.all_tools.length}</b> tools allowed · ${b.activity.length} calls`,
+    body: b => `<div class="tools">${b.mcp.all_tools.map(t => b.mcp.allowed.includes(t)
+                  ? `<span class="tool allow"><i class="ph ph-check-circle"></i>${esc(t)}</span>`
+                  : `<span class="tool deny"><i class="ph ph-lock-simple"></i>${esc(t)}</span>`).join('')}</div>` +
+               (b.mcp.error ? `<div class="bad" style="font-size:12px">MCP server unreachable (${esc(b.mcp.error)})</div>` : '') +
+               `<div class="event">Robot calls use this beam's delegated identity, so the audit log shows <b>you</b> and the beam's own workload identity.</div>` +
+               `<div class="event">Try it: give the demo user this role instead of <code>picar-driver</code>, start a new beam, and the drive tools drop out of the list.</div>
+<pre>kind: role
+version: v8
+metadata:
+  name: picar-viewer
+spec:
+  allow:
+    app_labels: {project: picar-beambot}
+    mcp:
+      tools: [snapshot, get_telemetry, stop]</pre>
+               <div class="wide" style="margin-top:12px"><div class="k" style="font-size:11px;font-weight:700;color:var(--muted)">RECENT ROBOT CALLS (VIA TELEPORT)</div>
+               <div class="acts">${b.activity.length ? b.activity.map(a => `<div><span class="${a.ok ? 'ok' : 'bad'}">●</span> ${new Date(a.ts*1000).toLocaleTimeString()} ${esc(a.tool)} ${esc(JSON.stringify(a.input))} · ${a.ms} ms</div>`).join('') : '<div>No robot calls yet. Ask BeamBot to count something.</div>'}</div></div>` +
+               (b.audit_url ? `<p><a href="${esc(b.audit_url)}" target="_blank" rel="noopener"><i class="ph ph-arrow-square-out"></i> Open the Teleport audit log</a></p>` : '') },
+  { id:'data', icon:'ph-database', title:'Databases through Teleport',
+    say:'Counts go to Postgres through Teleport database access when your identity can see it, and to SQLite inside the beam when not. Either way the app holds no database password: with Postgres, Teleport\'s certificate is the login.',
+    strip: b => { const pg = b.databases.postgres, rd = b.databases.redis;
+                  return `<b>${pg.kind === 'Postgres' ? 'Postgres' : 'SQLite'}</b>${pg.rows != null ? ' · ' + pg.rows + ' rows' : ''}${rd.enabled ? ' · <b>Redis</b>' + (rd.ok ? '' : ' (down)') : ''}`; },
+    body: b => { const pg = b.databases.postgres, rd = b.databases.redis;
+      let out = '<div class="k" style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px">POSTGRES · COUNTS</div>';
+      out += pg.kind === 'Postgres'
+        ? kv([['Teleport resource', pg.teleport_name], ['DB user', pg.db_user], ['Database', pg.database],
+              ['Reached at', pg.local + ' (tsh proxy db --tunnel)'],
+              ['Password in app', pg.password_in_url ? no('yes: remove it') : yes('none, Teleport cert auth')],
+              ['Rows', pg.rows ?? '–'], ['Query latency', pg.ms + ' ms']])
+        : kv([['Store', 'SQLite inside the beam'], ['Note', pg.error || 'Set DATABASE_URL to use beambot-postgres']]);
+      out += '<div class="k" style="font-size:11px;font-weight:700;color:var(--muted);margin:12px 0 4px">REDIS · LIVE ACTIVITY FEED</div>';
+      out += !rd.enabled ? kv([['Status', 'not enabled for this run']])
+        : !rd.ok ? kv([['Status', no(rd.error || 'unreachable')]])
+        : kv([['Teleport resource', rd.teleport_name], ['DB user', rd.db_user], ['Reached at', rd.local + ' (tsh proxy db --tunnel)'],
+              ['Auth', rd.password_in_url ? no('Redis ACL password on the beam (Redis requires AUTH)') : yes('no password in URL')],
+              ['Events stored', rd.events ?? '–'], ['Ping', rd.ms + ' ms']]);
+      return out + (pg.kind === 'Postgres' || rd.ok ? '<div class="event" style="margin-top:8px">These databases are reachable only through Teleport, which records database sessions and queries in the audit log.</div>' : ''); } },
+  { id:'publish', icon:'ph-globe-simple', title:'Published app',
+    say:'You\'re viewing this page through Teleport application access, with TLS and Teleport authentication in front of it.',
+    strip: b => `<b>${esc((b.published_url || '').replace('https://', '')) || '–'}</b>`,
+    body: b => kv([['URL', b.published_url || '–'], ['Published with', 'tsh beams publish'], ['Port in beam', '8080']]) },
+];
+const yes = s => ({html:`<span class="ok"><i class="ph ph-check-circle"></i> ${esc(s)}</span>`});
+const no  = s => ({html:`<span class="bad"><i class="ph ph-warning-circle"></i> ${esc(s)}</span>`});
+const kv = rows => `<div class="kv">${rows.map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${v && v.html ? v.html : esc(v)}</div>`).join('')}</div>`;
+
+function renderFeatures() {
+  if (!B) return;
+  $('beamGrid').innerHTML = FEATURES.map((f, i) => `<section class="sec">
+      <h3><i class="ph ${f.icon}"></i>${i + 1}. ${f.title}</h3><div class="strip">${f.strip(B)}</div>
+      <p class="say">${f.say}</p>${f.body(B)}</section>`).join('');
+  $('beamsCount').textContent = FEATURES.length;
+  $('drawerBody').innerHTML = FEATURES.map((f, i) => `<section class="sec ${focusId === f.id ? 'focus' : ''}" id="sec-${f.id}">
+      <h3><i class="ph ${f.icon}"></i>${i + 1}. ${f.title}</h3><p class="say">${f.say}</p>${f.body(B)}</section>`).join('');
+  $('runtimePill').textContent = B.runtime.inside_beam ? 'Running on Teleport Beams' : 'Local dev (not in a beam)';
+  $('runtimePill').className = 'pill' + (B.runtime.inside_beam ? '' : ' warn');
+}
+function setTab(t) {
+  t = t === 'beams' ? 'beams' : 'control';
+  $('controlView').hidden = t !== 'control';
+  $('beamsView').hidden = t !== 'beams';
+  document.querySelectorAll('.tabs button').forEach(b => {
+    b.classList.toggle('on', b.dataset.tab === t); b.setAttribute('aria-selected', b.dataset.tab === t); });
+  if (location.hash.slice(1) !== t) history.replaceState(null, '', t === 'control' ? location.pathname : '#beams');
+}
+window.addEventListener('hashchange', () => setTab(location.hash.slice(1)));
+let focusId = null, tourIdx = -1;
+function openDrawer(id) {
+  focusId = id; $('drawer').classList.add('open'); renderFeatures();
+  $('sec-' + id)?.scrollIntoView({behavior:'smooth', block:'start'});
+}
+function closeDrawer() { $('drawer').classList.remove('open'); focusId = null; tourIdx = -1; $('tourbar').hidden = true; renderFeatures(); }
+function startTour() { tourIdx = 0; $('tourbar').hidden = false; showStep(); }
+function tourStep(d) { tourIdx += d; if (tourIdx >= FEATURES.length) return closeDrawer(); if (tourIdx < 0) tourIdx = 0; showStep(); }
+function showStep() {
+  $('stepLabel').textContent = `Step ${tourIdx + 1} of ${FEATURES.length}`;
+  $('nextBtn').innerHTML = tourIdx === FEATURES.length - 1 ? 'Finish <i class="ph ph-check"></i>' : 'Next <i class="ph ph-caret-right"></i>';
+  openDrawer(FEATURES[tourIdx].id);
+}
+async function pollBeam() {
+  try { B = await (await fetch('/api/beam')).json(); renderFeatures(); } catch (e) {}
+  setTimeout(pollBeam, 3000);
+}
+
+/* ---------------- Tasks: change the agent's job, the prompt chips, and the DATA panel ---------------- */
+function renderTasks() {
+  $('tasks').innerHTML = Object.entries(TASKS).map(([k, t]) =>
+    `<button class="${k === task ? 'on' : ''}" onclick="setTask('${k}')"><i class="ph ${t.icon}"></i>${esc(t.label)}</button>`).join('');
+  $('chips').innerHTML = TASKS[task].chips.map(c => `<button onclick="ask(this.textContent)">${esc(c)}</button>`).join('');
+  $('dataTitle').textContent = 'Data · ' + TASKS[task].label;
+  $('q').placeholder = task === 'count' ? 'Ask BeamBot to count something…' : TASKS[task].mode === 'auto' ? 'Ask how the mapping is going…' : 'Tell BeamBot where to explore…';
+  $('autoBar').hidden = TASKS[task].mode !== 'auto';
+  if (S) renderAuto();
+  if (S) renderData();
+}
+function setTask(k) { task = k; renderTasks(); }
+
+const pick = (obj, path) => path.split('.').reduce((o, k) => o == null ? o : o[k], obj);
+function renderData() {
+  const ctx = { t: S.telemetry || {}, map: S.map, count: S.tally, auto: S.auto || {}, vision: S.vision || {} };
+  const html = TASKS[task].data.map(w => {
+    if (w.type === 'stat') {
+      let v = pick(ctx, w.key); if (typeof v === 'number') v = Math.round(v * 10) / 10;
+      return `<div class="stat"><div class="k">${esc(w.title)}</div><div class="v">${v == null || v === -1 ? '–' : esc(v) + (w.suffix || '')}</div></div>`;
+    }
+    if (w.type === 'maps') {
+      const rows = MAPS.maps || [];
+      return `<div class="wide maps"><div class="k">${esc(w.title)}${MAPS.store ? ' · ' + esc(MAPS.store) : ''}</div>${rows.length ? rows.slice(0, 5).map(m =>
+        `<div><span>${esc(m.name)} · ${m.explored_m2} m² · ${m.landmarks} landmarks · ${new Date(m.ts * 1000).toLocaleString()}</span><span><button onclick="loadMap(${m.id})">View</button> <button onclick="deleteMap(${m.id})" title="Delete">✕</button></span></div>`).join('')
+        : `<div class="empty">None yet. Save map stores the grid + landmarks in ${esc(MAPS.store || 'the database')} through Teleport.</div>`}</div>`;
+    }
+    if (w.type === 'log') {
+      const l = (pick(ctx, w.key) || []).slice(-w.limit).reverse();
+      return `<div class="wide loglist"><div class="k">${esc(w.title)}</div>${l.length ? l.map(e =>
+        `<div>${new Date(e.ts * 1000).toLocaleTimeString()} ${esc(e.msg)}</div>`).join('') : '<div class="empty">Not started. Press Start auto map.</div>'}</div>`;
+    }
+    if (w.type === 'totals') {
+      const e = Object.entries(S.tally.totals).sort((a, b) => b[1] - a[1]), max = Math.max(1, ...e.map(x => x[1]));
+      return `<div class="wide bars"><div class="k">${esc(w.title)}</div>${e.length ? e.map(([k, v]) =>
+        `<div class="row"><span>${esc(k)}</span><div class="bar" style="width:${(v / max) * 100}%"></div><span class="n">${Number(v)}</span></div>`).join('')
+        : '<div class="empty">No counts yet. Pick a prompt to start.</div>'}</div>`;
+    }
+    if (w.type === 'records') {
+      const r = S.tally.records.slice(-w.limit).reverse();
+      return r.length ? `<div class="wide recs"><div class="k">${esc(w.title)}</div>${r.map(x =>
+        `<div>${Number(x.count)} ${esc(x.object)} · ${x.confidence ?? '–'}% · at (${Math.round(x.x_cm)}, ${Math.round(x.y_cm)}) ${esc(x.note || '')}</div>`).join('')}</div>` : '';
+    }
+    return '';
+  }).join('');
+  const t = S.telemetry || {};
+  $('data').innerHTML = html + `<div class="wide event">${esc(t.error || t.last_event || '')}</div>`;
+}
+
+/* ---------------- Chat ---------------- */
+function add(cls, text) { const d = document.createElement('div'); d.className = 'msg ' + cls; d.textContent = text; log.appendChild(d); log.scrollTop = log.scrollHeight; return d; }
+async function ask(text) {
+  if (busy || !text.trim()) return;
+  busy = true; add('user', text); $('q').value = '';
+  const pending = add('bot', 'Working…');
+  const showTrace = (head, trace) => {
+    pending.textContent = head;
+    if (!trace?.length) return;
+    const t = document.createElement('div'); t.className = 'trace';
+    t.innerHTML = trace.map(s => `<div><span class="via ${s.via === 'local' ? 'local' : ''}">${s.via === 'local' ? 'APP' : 'TELEPORT MCP'}</span>${esc(s.tool)} ${esc(JSON.stringify(s.input))}</div>`).join('');
+    pending.appendChild(t); log.scrollTop = log.scrollHeight;
+  };
+  try {
+    // The agent runs as a background job (runs outlast the app proxy's request timeout); poll it.
+    const r = await post('/api/chat', {message:text, task});
+    const j = await readJson(r);
+    if (!r.ok) throw new Error(j.detail || r.statusText);
+    let job = {status:'running', trace:[]}, misses = 0;
+    while (job.status === 'running') {
+      await new Promise(res => setTimeout(res, 1200));
+      const pr = await fetch('/api/chat/' + j.job).catch(() => null);
+      const pj = pr ? await readJson(pr) : {};
+      if (!pr || !pr.ok) { if (++misses > 5 || pr?.status === 404) throw new Error(pj.detail || 'lost track of the job'); continue; }
+      misses = 0; job = pj;
+      if (job.status === 'running') showTrace(`Working… ${job.trace.length} step${job.trace.length === 1 ? '' : 's'}`, job.trace);
+    }
+    if (job.status === 'error') throw new Error(job.detail);
+    showTrace(job.reply || '(done)', job.trace);
+  } catch (e) { pending.classList.add('err'); pending.textContent = 'Error: ' + e.message; }
+  busy = false; log.scrollTop = log.scrollHeight;
+}
+$('f').onsubmit = e => { e.preventDefault(); ask($('q').value); };
+async function estop() { await post('/api/stop'); add('bot', 'Emergency stop sent.'); }
+async function resetMap() { await post('/api/reset', {what:'map'}); }
+async function resetCounts() { await post('/api/reset', {what:'counts'}); }
+const AUTO_ACTIVE = ['starting', 'scanning', 'exploring', 'stopping'];
+let MAPS = {maps: [], store: ''};
+async function refreshMaps() { try { MAPS = await (await fetch('/api/maps')).json(); if (S) renderData(); } catch (e) {} }
+async function saveMap() {
+  const r = await (await post('/api/maps', {})).json();
+  add('bot', r.ok ? `Map saved as “${r.name}” (${r.explored_m2} m², ${(S.landmarks || []).length} landmarks) in ${r.store} through Teleport.` : 'Could not save the map: ' + (r.error || ''));
+  refreshMaps();
+}
+async function loadMap(id) {
+  const r = await (await post(`/api/maps/${id}/load`)).json();
+  add('bot', r.ok ? `Showing saved map “${r.name}”. Positions are relative to where BeamBot started that run; live readings are added on top. Reset map returns to a blank live map.` : 'Could not load: ' + (r.error || ''));
+}
+async function deleteMap(id) { await fetch(`/api/maps/${id}`, {method: 'DELETE'}); refreshMaps(); }
+function downloadMap() {
+  const a = document.createElement('a');
+  a.download = `beambot-map-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')}.png`;
+  a.href = cv.toDataURL('image/png'); a.click();
+}
+async function sayHello() {
+  const b = $('sayBtn'); b.disabled = true;
+  try {
+    const r = await (await post('/api/say', {text: 'Hello Beams, I love you'})).json();
+    add('bot', r.ok ? 'BeamBot said “Hello Beams, I love you” (the say tool, through Teleport MCP).' : 'Speaker: ' + (r.error || r.result || 'the robot has no say tool yet'));
+  } catch (e) { add('bot', 'Speaker: ' + e.message); }
+  b.disabled = false;
+}
+async function toggleAuto() {
+  const running = AUTO_ACTIVE.includes((S.auto || {}).state);
+  const body = running ? {} : {speed: +$('autoSpeed').value, max_moves: +$('autoMoves').value, max_minutes: +$('autoMins').value, vision: $('autoVision').checked};
+  const r = await post(running ? '/api/automap/stop' : '/api/automap/start', body);
+  if (!running && r.ok) { setTask('auto'); add('bot', 'Auto map mode on: scanning, then driving to the nearest unexplored edge until the map is complete. Every move is a Teleport MCP `drive` call. Drive pad or STOP takes over.'); }
+  if (!running && !r.ok) add('bot', 'Could not start auto map: ' + ((await r.json().catch(() => ({}))).error || r.status));
+}
+function renderAuto() {
+  const a = S.auto || {}, running = AUTO_ACTIVE.includes(a.state);
+  $('autoBtn').innerHTML = running ? '<i class="ph ph-stop"></i> Stop auto-map' : '<i class="ph ph-path"></i> Auto-map';
+  $('autoGo').innerHTML = running ? '<i class="ph ph-stop"></i> Stop' : '<i class="ph ph-play"></i> Start auto map';
+  $('autoGo').classList.toggle('running', running);
+  $('autoBar').toggleAttribute('data-running', running);
+  $('loadedMap').textContent = S.loaded_map ? 'Showing saved map: ' + S.loaded_map : '';
+  const v = S.vision || {};
+  $('autoBarSt').innerHTML = running ? `<span class="pulse"></span>${esc(a.state)} · ${a.moves || 0} moves · ${S.map ? S.map.explored_m2 : 0} m² · ${a.frontiers_left ?? '?'} frontiers left · ${v.landmarks || 0} landmarks`
+    : a.state === 'stuck' ? `<span class="bad">Stuck</span> · ${esc(a.detail || '')}`
+    : a.state && a.state !== 'idle' ? `Last run: ${esc(a.state)}${a.detail ? ' · ' + esc(a.detail) : ''} · ${S.map ? S.map.explored_m2 : 0} m²`
+    : 'Ready. Put BeamBot on the floor with room to turn.';
+  $('autoStat').textContent = a.state && a.state !== 'idle'
+    ? `Auto-map: ${a.state} · ${a.moves || 0} moves · ${a.scans || 0} scans` +
+      (running && a.goal_dist_cm != null ? ` · next ${(a.goal_dist_cm / 100).toFixed(1)} m` : '') + (a.detail ? ` · ${a.detail}` : '')
+    : '';
+}
+
+/* ---------------- Manual drive: same Teleport MCP tools as the agent (drive / stop / look) ---------------- */
+const MOVES = {fwd:[1, 0], back:[-1, 0], left:[1, -30], right:[1, 30]};
+const KEYS = {w:'fwd', arrowup:'fwd', s:'back', arrowdown:'back', a:'left', arrowleft:'left', d:'right', arrowright:'right'};
+const CAMKEYS = {i:'up', k:'down', j:'left', l:'right', c:'center'};
+let held = null, holdTimer = null, cam = {pan:0, tilt:0}, camBusy = false, camNext = null;
+const driveMsg = (m, bad) => { $('driveMsg').textContent = m; $('driveMsg').className = 'drivehint' + (bad ? ' bad' : ''); };
+async function driveSend() {
+  if (!held) return;
+  const [dir, steer] = MOVES[held];
+  const r = await post('/api/drive', {speed: dir * +$('spd').value, seconds: 1, steer_deg: steer});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) driveMsg('Drive refused: ' + (j.result || j.error || r.statusText), true);
+  else if (held) driveMsg(j.result || 'driving');
+}
+function driveStart(m) {
+  if (m === 'stop') return driveEnd(true);
+  if (held === m) return;
+  held = m; markPad();
+  clearInterval(holdTimer); driveSend(); holdTimer = setInterval(driveSend, 800);  // robot times each 1 s move out itself
+}
+function driveEnd(force) {
+  if (!held && !force) return;
+  held = null; clearInterval(holdTimer); markPad();
+  post('/api/drive/stop').then(() => driveMsg('stopped'));
+}
+const markPad = () => document.querySelectorAll('.pad.drive [data-m]').forEach(b => b.classList.toggle('on', b.dataset.m === held));
+function aim(dir) {
+  const STEP = 15;
+  if (dir === 'center') cam = {pan:0, tilt:0};
+  else if (dir === 'left') cam.pan = Math.max(-90, cam.pan - STEP);
+  else if (dir === 'right') cam.pan = Math.min(90, cam.pan + STEP);
+  else if (dir === 'up') cam.tilt = Math.min(65, cam.tilt + STEP);
+  else if (dir === 'down') cam.tilt = Math.max(-35, cam.tilt - STEP);
+  camNext = {pan_deg: cam.pan, tilt_deg: cam.tilt}; lookFlush();
+}
+async function lookFlush() {   // coalesce rapid presses: only the latest angle goes out after each call
+  if (camBusy || !camNext) return;
+  camBusy = true; const b = camNext; camNext = null;
+  const r = await post('/api/look', b).catch(() => null);
+  if (r && !r.ok) driveMsg('Look refused: ' + ((await r.json().catch(() => ({}))).error || r.statusText), true);
+  camBusy = false; lookFlush();
+}
+document.querySelectorAll('.pad.drive [data-m]').forEach(b => {
+  b.addEventListener('pointerdown', e => { e.preventDefault(); b.setPointerCapture(e.pointerId); driveStart(b.dataset.m); });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => b.addEventListener(ev, () => driveEnd()));
+});
+document.querySelectorAll('.pad.cam [data-cam]').forEach(b => b.addEventListener('click', () => aim(b.dataset.cam)));
+const typing = e => /^(INPUT|TEXTAREA)$/.test(e.target.tagName) && e.target.type !== 'range';
+document.addEventListener('keydown', e => {
+  if (typing(e) || e.metaKey || e.ctrlKey || $('controlView').hidden) return;
+  const k = e.key.toLowerCase();
+  if (KEYS[k]) { e.preventDefault(); driveStart(KEYS[k]); }
+  else if (k === ' ') { e.preventDefault(); driveEnd(true); }
+  else if (CAMKEYS[k] && !e.repeat) { e.preventDefault(); aim(CAMKEYS[k]); }
+});
+document.addEventListener('keyup', e => { if (KEYS[e.key.toLowerCase()] === held) driveEnd(); });
+window.addEventListener('blur', () => driveEnd());
+document.addEventListener('visibilitychange', () => document.hidden && driveEnd());
+
+/* ---------------- Office map ---------------- */
+const cv = $('map'), ctx = cv.getContext('2d');
+const PIN = ['#4CEAF5', '#A6A2FF', '#FF5731', '#169984', '#C8C8FF', '#651FFF'];
+function draw(s) {
+  const dpr = devicePixelRatio, W = cv.width = cv.clientWidth * dpr, H = cv.height = cv.clientHeight * dpr;
+  const N = s.grid_size, cell = s.cell_cm, bytes = Uint8Array.from(atob(s.grid), c => c.charCodeAt(0));
+  const t = s.telemetry || {}, pose = t.pose || {x_cm:0, y_cm:0, heading_deg:0};
+  let minx = N, maxx = 0, miny = N, maxy = 0;
+  for (let i = 0; i < bytes.length; i++) if (bytes[i]) { const x = i % N, y = (i / N) | 0; minx = Math.min(minx, x); maxx = Math.max(maxx, x); miny = Math.min(miny, y); maxy = Math.max(maxy, y); }
+  (s.landmarks || []).forEach(l => { const x = N/2 + l.x_cm/cell, y = N/2 - l.y_cm/cell; minx = Math.min(minx, x); maxx = Math.max(maxx, x); miny = Math.min(miny, y); maxy = Math.max(maxy, y); });
+  const rx = N/2 + pose.x_cm/cell, ry = N/2 - pose.y_cm/cell;
+  minx = Math.min(minx, rx) - 10; maxx = Math.max(maxx, rx) + 10; miny = Math.min(miny, ry) - 10; maxy = Math.max(maxy, ry) + 10;
+  const span = Math.max(maxx - minx, maxy - miny, 40), sc = Math.min(W, H) / span;
+  const ox = (W - (maxx - minx) * sc) / 2 - minx * sc, oy = (H - (maxy - miny) * sc) / 2 - miny * sc;
+  const X = g => ox + g * sc, Y = g => oy + g * sc, GX = x => N/2 + x/cell, GY = y => N/2 - y/cell;
+  const grad = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H) * .7);
+  grad.addColorStop(0, '#241264'); grad.addColorStop(1, '#130833');
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#3A209566'; ctx.lineWidth = 1; const step = 50 / cell;
+  for (let g = Math.floor(minx/step)*step; g <= maxx; g += step) { ctx.beginPath(); ctx.moveTo(X(g), 0); ctx.lineTo(X(g), H); ctx.stroke(); }
+  for (let g = Math.floor(miny/step)*step; g <= maxy; g += step) { ctx.beginPath(); ctx.moveTo(0, Y(g)); ctx.lineTo(W, Y(g)); ctx.stroke(); }
+  for (let i = 0; i < bytes.length; i++) { if (!bytes[i]) continue; const x = i % N, y = (i / N) | 0;
+    ctx.fillStyle = bytes[i] === 2 ? '#EFF1FE' : '#3A2095'; ctx.fillRect(X(x - .5), Y(y - .5), Math.ceil(sc), Math.ceil(sc)); }
+  const path = t.path || [];
+  if (path.length > 1) { ctx.strokeStyle = '#8879FF'; ctx.lineWidth = 2 * dpr; ctx.beginPath();
+    path.forEach(([px, py], i) => i ? ctx.lineTo(X(GX(px)), Y(GY(py))) : ctx.moveTo(X(GX(px)), Y(GY(py)))); ctx.stroke(); }
+  const recs = s.tally.records, objs = [...new Set(recs.map(r => r.object))];
+  ctx.font = `700 ${11 * dpr}px Lato, system-ui`;
+  recs.forEach(r => { const a = X(GX(r.x_cm)), b = Y(GY(r.y_cm));
+    ctx.fillStyle = PIN[objs.indexOf(r.object) % PIN.length]; ctx.beginPath(); ctx.arc(a, b, 6 * dpr, 0, 7); ctx.fill();
+    ctx.fillStyle = '#EFF1FE'; ctx.fillText(`${r.count} ${r.object}`, a + 9 * dpr, b + 4 * dpr); });
+  const auto = s.auto || {}, live = AUTO_ACTIVE.includes(auto.state);
+  if (live && auto.frontiers) { ctx.fillStyle = '#4CEAF5aa';
+    auto.frontiers.forEach(([x, y]) => ctx.fillRect(X(x - .5), Y(y - .5), Math.ceil(sc), Math.ceil(sc))); }
+  if (live && auto.path_cm && auto.path_cm.length > 1) { ctx.strokeStyle = '#4CEAF5'; ctx.lineWidth = 2 * dpr; ctx.setLineDash([4 * dpr, 4 * dpr]); ctx.beginPath();
+    auto.path_cm.forEach(([px, py], i) => i ? ctx.lineTo(X(GX(px)), Y(GY(py))) : ctx.moveTo(X(GX(px)), Y(GY(py)))); ctx.stroke(); ctx.setLineDash([]); }
+  if (live && auto.goal_cm) { ctx.strokeStyle = '#4CEAF5'; ctx.lineWidth = 2 * dpr; ctx.beginPath(); ctx.arc(X(GX(auto.goal_cm[0])), Y(GY(auto.goal_cm[1])), 7 * dpr, 0, 7); ctx.stroke(); }
+  (s.hazards || []).forEach(h => { ctx.strokeStyle = '#FF5731'; ctx.lineWidth = 2 * dpr; ctx.beginPath(); ctx.arc(X(GX(h.x_cm)), Y(GY(h.y_cm)), 8 * dpr, 0, 7); ctx.stroke(); });
+  ctx.font = `700 ${11 * dpr}px Lato, system-ui`;
+  (s.landmarks || []).forEach(l => { const a = X(GX(l.x_cm)), b = Y(GY(l.y_cm));
+    ctx.fillStyle = '#FFB020'; ctx.beginPath(); ctx.moveTo(a, b - 6 * dpr); ctx.lineTo(a + 5 * dpr, b + 4 * dpr); ctx.lineTo(a - 5 * dpr, b + 4 * dpr); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#EFF1FE'; ctx.fillText(l.label, a + 8 * dpr, b + 4 * dpr); });
+  const a = X(rx), b = Y(ry), r = 11 * dpr;
+  ctx.save(); ctx.translate(a, b); ctx.rotate(-pose.heading_deg * Math.PI / 180);
+  ctx.fillStyle = '#512FC9'; ctx.strokeStyle = '#EFF1FE'; ctx.lineWidth = 2 * dpr;
+  ctx.beginPath(); ctx.moveTo(r, 0); ctx.lineTo(-r * .7, r * .6); ctx.lineTo(-r * .7, -r * .6); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+}
+
+async function poll() {
+  try {
+    S = await (await fetch('/api/state')).json();
+    const t = S.telemetry || {};
+    $('dot').className = 'status-dot ' + (t.error ? 'bad' : t.pose ? 'ok' : '');
+    $('dot').title = t.error || (t.simulated ? 'Robot simulator connected' : 'Robot connected');
+    if (t.camera && !camBusy && !camNext) cam = {pan: t.camera.pan, tilt: t.camera.tilt};
+    renderData(); renderAuto(); draw(S);
+  } catch (e) { $('dot').className = 'status-dot bad'; }
+  setTimeout(poll, 500);
+}
+
+// Live video. A plain <img src="/api/video"> freezes silently when the long-lived MJPEG stream stalls
+// (Dev Tools still shows 200). Read the stream ourselves, show each JPEG, and reopen it after 3 s without a frame.
+function jpegMark(b, m, from) {
+  for (let i = from; i < b.length - 1; i++) if (b[i] === 0xFF && b[i + 1] === m) return i;
+  return -1;
+}
+async function startVideo() {
+  const img = $('video');
+  for (;;) {
+    const ctl = new AbortController();
+    let lastFrame = Date.now();
+    const watchdog = setInterval(() => { if (Date.now() - lastFrame > 3000) ctl.abort(); }, 1000);
+    try {
+      const r = await fetch('/api/video?t=' + Date.now(), {signal: ctl.signal, cache: 'no-store'});
+      const reader = r.body.getReader();
+      let buf = new Uint8Array(0);
+      for (;;) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        const nb = new Uint8Array(buf.length + value.length); nb.set(buf); nb.set(value, buf.length); buf = nb;
+        for (;;) {   // pull out every complete JPEG (SOI 0xFFD8 .. EOI 0xFFD9)
+          const s = jpegMark(buf, 0xD8, 0);
+          if (s < 0) { buf = buf.slice(-1); break; }
+          const e = jpegMark(buf, 0xD9, s + 2);
+          if (e < 0) { buf = buf.slice(s); break; }
+          const url = URL.createObjectURL(new Blob([buf.slice(s, e + 2)], {type: 'image/jpeg'}));
+          const old = img.src; img.src = url; if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+          lastFrame = Date.now();
+          buf = buf.slice(e + 2);
+        }
+        if (buf.length > 4e6) buf = new Uint8Array(0);   // never let a garbled stream grow without bound
+      }
+    } catch (e) { /* aborted by the watchdog or the network dropped: reconnect below */ }
+    clearInterval(watchdog); ctl.abort();
+    await new Promise(res => setTimeout(res, 1000));
+  }
+}
+
+(async () => {
+  startVideo();
+  TASKS = await (await fetch('/api/tasks')).json();
+  add('bot', 'Hi, I\'m BeamBot. Pick a task above, then ask me to count objects or map the office. Results land on the map.');
+  setTab(location.hash.slice(1)); renderTasks(); poll(); pollBeam(); refreshMaps(); setInterval(refreshMaps, 15000);
+})();
+</script>
+</body>
+</html>

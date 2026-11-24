@@ -1,0 +1,49 @@
+# A simulated PiCar-X that is always on, inside your cluster. Reached only through Teleport (see deploy.sh).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: picar-sim
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: picar-sim
+  namespace: picar-sim
+spec:
+  replicas: 1            # one robot: it has a position, a heading and a camera, so don't scale it out
+  selector:
+    matchLabels: {app: picar-sim}
+  template:
+    metadata:
+      labels: {app: picar-sim}
+    spec:
+      containers:
+        - name: robot
+          image: picar-sim:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 8765}
+          readinessProbe:
+            httpGet: {path: /telemetry, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /telemetry, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: picar-sim
+  namespace: picar-sim
+spec:
+  selector: {app: picar-sim}
+  ports:
+    - {name: http, port: 8765, targetPort: http}

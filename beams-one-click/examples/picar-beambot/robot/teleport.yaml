@@ -1,0 +1,30 @@
+# /etc/teleport.yaml on the PiCar-X — Teleport Application Service only.
+# Publishes the robot's MCP tools and its video/telemetry stream into the cluster.
+version: v3
+teleport:
+  nodename: picar-beambot
+  join_params:
+    token_name: "/tmp/token"          # from: tctl tokens add --type=app --format=text
+    method: token
+  proxy_server: "<your-tenant>.beams.run:443"   # your Teleport proxy address
+auth_service:
+  enabled: false
+proxy_service:
+  enabled: false
+ssh_service:
+  enabled: false                       # set true if you also want `tsh ssh` to the Pi
+app_service:
+  enabled: true
+  apps:
+    # MCP tools: drive, look, stop, snapshot, get_telemetry
+    - name: picar-mcp
+      uri: "mcp+http://127.0.0.1:8765/mcp"
+      description: "BeamBot PiCar-X robot controls"
+      labels:
+        project: picar-beambot
+    # Live video + telemetry for the dashboard
+    - name: picar-stream
+      uri: "http://127.0.0.1:8765"
+      description: "BeamBot PiCar-X video and telemetry"
+      labels:
+        project: picar-beambot

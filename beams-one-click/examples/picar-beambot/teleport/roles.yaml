@@ -1,0 +1,54 @@
+# Teleport roles for the PiCar-X BeamBot.   tctl create -f teleport/roles.yaml
+#
+# picar-viewer / picar-driver match the two apps in robot/teleport.yaml (picar-mcp, picar-stream) by label.
+# beambot-data matches the optional databases (beambot-postgres, beambot-redis) by the same label.
+# Put the role on the *beam* with `--roles`; never let a beam inherit your admin roles.
+# `mcp.tools` is what Teleport shows the agent in tools/list; anything not listed is invisible to it.
+#
+# NOTE: no `deny` rules on purpose. Teleport deny rules apply to the whole identity, so a deny in the
+# viewer role would also block a driver grant that arrives through an access request.
+kind: role
+version: v8
+metadata:
+  name: picar-viewer
+  description: See what the PiCar-X sees. Can always hit stop. Cannot drive, aim or speak.
+spec:
+  allow:
+    app_labels:
+      project: picar-beambot
+    mcp:
+      tools: [snapshot, get_telemetry, stop]
+    request:
+      roles: [picar-driver]
+      reason:
+        mode: required
+  options:
+    max_session_ttl: 8h
+---
+kind: role
+version: v8
+metadata:
+  name: picar-driver
+  description: Full control of the PiCar-X, time-boxed. Every call lands in the Teleport audit log.
+spec:
+  allow:
+    app_labels:
+      project: picar-beambot
+    mcp:
+      tools: [snapshot, get_telemetry, stop, look, drive, say]
+  options:
+    max_session_ttl: 1h
+---
+kind: role
+version: v8
+metadata:
+  name: beambot-data
+  description: Let the BeamBot dashboard store its counts in Postgres and its activity feed in Redis, nothing else.
+spec:
+  allow:
+    db_labels:
+      project: picar-beambot
+    db_users: [app]
+    db_names: [beambot]
+  options:
+    max_session_ttl: 8h
