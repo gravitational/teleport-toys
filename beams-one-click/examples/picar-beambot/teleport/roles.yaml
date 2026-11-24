@@ -1,7 +1,14 @@
 # Teleport roles for the PiCar-X BeamBot.   tctl create -f teleport/roles.yaml
 #
-# picar-viewer / picar-driver match the two apps in robot/teleport.yaml (picar-mcp, picar-stream) by label.
+# picar-viewer / picar-driver grant the MCP app picar-mcp (robot/teleport.yaml) and choose its tools.
+# picar-stream grants the plain HTTP app picar-stream: live video, telemetry and a stop button, served on a
+#   second port with no /mcp. Hand it out next to either tier when the dashboard should show video.
 # beambot-data matches the optional databases (beambot-postgres, beambot-redis) by the same label.
+#
+# Why two kinds of grant: `mcp.tools` only filters MCP apps. A role that matched the stream app and the robot's
+# MCP endpoint through one label would let a viewer POST `tools/call drive` through the HTTP app and bypass the
+# tool list. So the MCP grants carry `teleport.internal/app-sub-kind: mcp` (they can only ever match MCP apps),
+# and the HTTP app is on a port that serves nothing but read-only streams and `/stop`.
 # Put the role on the *beam* with `--roles`; never let a beam inherit your admin roles.
 # `mcp.tools` is what Teleport shows the agent in tools/list; anything not listed is invisible to it.
 #
@@ -16,6 +23,7 @@ spec:
   allow:
     app_labels:
       project: picar-beambot
+      teleport.internal/app-sub-kind: mcp
     mcp:
       tools: [snapshot, get_telemetry, stop]
     request:
@@ -34,10 +42,24 @@ spec:
   allow:
     app_labels:
       project: picar-beambot
+      teleport.internal/app-sub-kind: mcp
     mcp:
       tools: [snapshot, get_telemetry, stop, look, drive, say]
   options:
     max_session_ttl: 1h
+---
+kind: role
+version: v8
+metadata:
+  name: picar-stream
+  description: Watch the PiCar-X video and telemetry (and hit stop) through the plain HTTP app. Cannot drive.
+spec:
+  allow:
+    app_labels:
+      project: picar-beambot
+      surface: stream
+  options:
+    max_session_ttl: 8h
 ---
 kind: role
 version: v8

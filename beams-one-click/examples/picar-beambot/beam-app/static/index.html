@@ -172,6 +172,7 @@
   </nav>
   <span class="spacer"></span>
   <button class="primary" onclick="startTour()"><i class="ph ph-play-circle"></i> Tour Beams features</button>
+  <button class="primary" id="resumeBtn" hidden onclick="resume()"><i class="ph ph-play"></i> Resume</button>
   <button class="stop" onclick="estop()"><i class="ph ph-hand-palm"></i> STOP</button>
 </header>
 
@@ -246,6 +247,7 @@
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const readJson = async r => { const t = await r.text(); try { return JSON.parse(t); } catch { return {detail: t.slice(0, 200) || r.statusText}; } };
+const num = (v, d = '–') => typeof v === 'number' && Number.isFinite(v) ? v : d;   // data from Redis/Postgres: never trust its type
 const post = (u, b) => fetch(u, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b || {})});
 const log = $('log');
 let TASKS = {}, task = 'count', busy = false, S = null, B = null;
@@ -294,7 +296,7 @@ spec:
     mcp:
       tools: [snapshot, get_telemetry, stop]</pre>
                <div class="wide" style="margin-top:12px"><div class="k" style="font-size:11px;font-weight:700;color:var(--muted)">RECENT ROBOT CALLS (VIA TELEPORT)</div>
-               <div class="acts">${b.activity.length ? b.activity.map(a => `<div><span class="${a.ok ? 'ok' : 'bad'}">●</span> ${new Date(a.ts*1000).toLocaleTimeString()} ${esc(a.tool)} ${esc(JSON.stringify(a.input))} · ${a.ms} ms</div>`).join('') : '<div>No robot calls yet. Ask BeamBot to count something.</div>'}</div></div>` +
+               <div class="acts">${b.activity.length ? b.activity.map(a => `<div><span class="${a.ok ? 'ok' : 'bad'}">●</span> ${new Date(num(a.ts, 0)*1000).toLocaleTimeString()} ${esc(a.tool)} ${esc(JSON.stringify(a.input))} · ${esc(num(a.ms))} ms</div>`).join('') : '<div>No robot calls yet. Ask BeamBot to count something.</div>'}</div></div>` +
                (b.audit_url ? `<p><a href="${esc(b.audit_url)}" target="_blank" rel="noopener"><i class="ph ph-arrow-square-out"></i> Open the Teleport audit log</a></p>` : '') },
   { id:'data', icon:'ph-database', title:'Databases through Teleport',
     say:'Counts go to Postgres through Teleport database access when your identity can see it, and to SQLite inside the beam when not. Either way the app holds no database password: with Postgres, Teleport\'s certificate is the login.',
@@ -386,7 +388,7 @@ function renderData() {
     if (w.type === 'maps') {
       const rows = MAPS.maps || [];
       return `<div class="wide maps"><div class="k">${esc(w.title)}${MAPS.store ? ' · ' + esc(MAPS.store) : ''}</div>${rows.length ? rows.slice(0, 5).map(m =>
-        `<div><span>${esc(m.name)} · ${m.explored_m2} m² · ${m.landmarks} landmarks · ${new Date(m.ts * 1000).toLocaleString()}</span><span><button onclick="loadMap(${m.id})">View</button> <button onclick="deleteMap(${m.id})" title="Delete">✕</button></span></div>`).join('')
+        `<div><span>${esc(m.name)} · ${esc(num(m.explored_m2))} m² · ${esc(num(m.landmarks))} landmarks · ${new Date(num(m.ts, 0) * 1000).toLocaleString()}</span><span><button onclick="loadMap(${num(m.id, 0)})">View</button> <button onclick="deleteMap(${num(m.id, 0)})" title="Delete">✕</button></span></div>`).join('')
         : `<div class="empty">None yet. Save map stores the grid + landmarks in ${esc(MAPS.store || 'the database')} through Teleport.</div>`}</div>`;
     }
     if (w.type === 'log') {
@@ -403,7 +405,7 @@ function renderData() {
     if (w.type === 'records') {
       const r = S.tally.records.slice(-w.limit).reverse();
       return r.length ? `<div class="wide recs"><div class="k">${esc(w.title)}</div>${r.map(x =>
-        `<div>${Number(x.count)} ${esc(x.object)} · ${x.confidence ?? '–'}% · at (${Math.round(x.x_cm)}, ${Math.round(x.y_cm)}) ${esc(x.note || '')}</div>`).join('')}</div>` : '';
+        `<div>${esc(num(x.count))} ${esc(x.object)} · ${esc(num(x.confidence))}% · at (${Math.round(x.x_cm)}, ${Math.round(x.y_cm)}) ${esc(x.note || '')}</div>`).join('')}</div>` : '';
     }
     return '';
   }).join('');
@@ -438,13 +440,25 @@ async function ask(text) {
       misses = 0; job = pj;
       if (job.status === 'running') showTrace(`Working… ${job.trace.length} step${job.trace.length === 1 ? '' : 's'}`, job.trace);
     }
-    if (job.status === 'error') throw new Error(job.detail);
+    if (job.status === 'error' || job.status === 'stopped') throw new Error(job.detail);
     showTrace(job.reply || '(done)', job.trace);
   } catch (e) { pending.classList.add('err'); pending.textContent = 'Error: ' + e.message; }
   busy = false; log.scrollTop = log.scrollHeight;
 }
 $('f').onsubmit = e => { e.preventDefault(); ask($('q').value); };
-async function estop() { await post('/api/stop'); add('bot', 'Emergency stop sent.'); }
+async function estop() {
+  let r, j = {};
+  try { r = await post('/api/stop'); j = await readJson(r); } catch (e) { j = {error: e.message}; }
+  if (r && r.ok) {
+    setHalted(true);
+    add('bot', `Emergency stop: the car was told to stop (${j.via || 'robot'}) and BeamBot is halted. It will not move until you press Resume.`);
+  } else {
+    setHalted(true);
+    add('bot', `STOP FAILED: ${j.error || j.detail || (r ? r.status : 'no answer')}. BeamBot is halted and will not send more commands, but the car may still be moving: cut its power.`);
+  }
+}
+async function resume() { await post('/api/resume'); setHalted(false); add('bot', 'Resumed. BeamBot can move again.'); }
+function setHalted(on) { $('resumeBtn').hidden = !on; }
 async function resetMap() { await post('/api/reset', {what:'map'}); }
 async function resetCounts() { await post('/api/reset', {what:'counts'}); }
 const AUTO_ACTIVE = ['starting', 'scanning', 'exploring', 'stopping'];
@@ -609,6 +623,7 @@ async function poll() {
   try {
     S = await (await fetch('/api/state')).json();
     const t = S.telemetry || {};
+    setHalted(!!S.halted);
     $('dot').className = 'status-dot ' + (t.error ? 'bad' : t.pose ? 'ok' : '');
     $('dot').title = t.error || (t.simulated ? 'Robot simulator connected' : 'Robot connected');
     if (t.camera && !camBusy && !camNext) cam = {pan: t.camera.pan, tilt: t.camera.tilt};

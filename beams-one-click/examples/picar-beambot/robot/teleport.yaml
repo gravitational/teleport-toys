@@ -22,9 +22,11 @@ app_service:
       description: "BeamBot PiCar-X robot controls"
       labels:
         project: picar-beambot
-    # Live video + telemetry for the dashboard
+    # Live video + telemetry for the dashboard. A second port with no /mcp on it: Teleport's `mcp.tools`
+    # filter only applies to MCP apps, so a plain HTTP app must never be able to reach the drive tool.
     - name: picar-stream
-      uri: "http://127.0.0.1:8765"
-      description: "BeamBot PiCar-X video and telemetry"
+      uri: "http://127.0.0.1:8766"
+      description: "BeamBot PiCar-X video, telemetry and stop"
       labels:
         project: picar-beambot
+        surface: stream

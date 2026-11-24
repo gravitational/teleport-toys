@@ -115,6 +115,21 @@ def test_up_refuses_to_inherit_every_role(teleport, tmp_path):
     assert teleport.calls("tsh", "beams", "add") == []
 
 
+@pytest.mark.parametrize("blank", ["", " ", ",", " , "])
+def test_up_treats_a_blank_role_list_as_not_given(teleport, tmp_path, blank):
+    """`--roles=" "` may give the beam every role you hold, so a blank list must never reach tsh."""
+    r = up(teleport, tmp_path, "--roles", blank, "--labels", "robot=beambot-sim")
+    assert r.returncode == 2 and "--roles" in r.stderr
+    assert teleport.calls("tsh", "beams", "add") == []
+
+
+def test_up_rejects_empty_role_entries_and_strips_spaces(teleport, tmp_path):
+    assert up(teleport, tmp_path, "--roles", "beam-user,,picar-viewer", "--labels", "x=y").returncode == 2
+    assert teleport.calls("tsh", "beams", "add") == []
+    assert up(teleport, tmp_path, "--roles", " beam-user, picar-viewer ", "--labels", "robot=beambot-sim").returncode == 0
+    assert "--roles=beam-user,picar-viewer" in teleport.calls("tsh", "beams", "add")[0]["args"]
+
+
 def test_up_can_inherit_when_explicitly_asked(teleport, tmp_path):
     assert up(teleport, tmp_path, "--inherit-roles", "--labels", "robot=beambot-sim").returncode == 0
     assert not any(a.startswith("--roles") for a in teleport.calls("tsh", "beams", "add")[0]["args"])

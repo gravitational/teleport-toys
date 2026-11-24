@@ -22,12 +22,13 @@ spec:
           image: picar-sim:dev
           imagePullPolicy: IfNotPresent
           ports:
-            - {name: http, containerPort: 8765}
+            - {name: mcp, containerPort: 8765}      # /mcp only
+            - {name: stream, containerPort: 8766}   # video, telemetry, stop: no /mcp
           readinessProbe:
-            httpGet: {path: /telemetry, port: http}
+            httpGet: {path: /telemetry, port: stream}
             periodSeconds: 5
           livenessProbe:
-            httpGet: {path: /telemetry, port: http}
+            httpGet: {path: /telemetry, port: stream}
             initialDelaySeconds: 10
             periodSeconds: 20
           resources:
@@ -46,4 +47,5 @@ metadata:
 spec:
   selector: {app: picar-sim}
   ports:
-    - {name: http, port: 8765, targetPort: http}
+    - {name: mcp, port: 8765, targetPort: mcp}
+    - {name: stream, port: 8766, targetPort: stream}

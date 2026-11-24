@@ -15,8 +15,10 @@ apps:
     uri: "mcp+http://picar-sim.picar-sim.svc.cluster.local:8765/mcp"
     labels:
       project: picar-beambot
-  # Live video + telemetry for the dashboard (optional)
+  # Live video + telemetry + stop for the dashboard (optional). A second port with no /mcp on it: Teleport's
+  # `mcp.tools` filter only applies to MCP apps, so a plain HTTP app must never be able to reach the drive tool.
   - name: picar-stream
-    uri: "http://picar-sim.picar-sim.svc.cluster.local:8765"
+    uri: "http://picar-sim.picar-sim.svc.cluster.local:8766"
     labels:
       project: picar-beambot
+      surface: stream

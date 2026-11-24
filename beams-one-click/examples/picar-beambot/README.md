@@ -10,8 +10,9 @@ The brain is a web app running in a **Teleport Beam**.
               ├─ tsh proxy mcp picar-mcp    ─┐
               └─ tsh proxy app picar-stream ─┤   Teleport: RBAC on tool names + audit log
                                              ▼
-        PiCar-X (Raspberry Pi) ── Teleport app_service ──► robot_mcp.py on 127.0.0.1:8765
-                                                           /mcp  /video.mjpg  /snapshot.jpg  /telemetry  /stop
+        PiCar-X (Raspberry Pi) ── Teleport app_service ──► robot_mcp.py, two ports on 127.0.0.1
+                                                           :8765  /mcp                                  (picar-mcp)
+                                                           :8766  /video.mjpg /snapshot.jpg /telemetry /stop   (picar-stream)
 ```
 
 Nothing on the robot listens on a public interface, and the beam holds no model keys.
@@ -30,6 +31,11 @@ Nothing on the robot listens on a public interface, and the beam holds no model 
 Roles are in [`teleport/roles.yaml`](teleport/roles.yaml). Teleport hides tools a role doesn't allow, so a
 viewer-only agent asked to drive explains that it hasn't been granted the tool. That is the demo.
 
+That filter only applies to MCP apps. So the robot serves **two ports**: `:8765` has `/mcp` and is published as the
+MCP app `picar-mcp`; `:8766` has the video, telemetry and a `/stop` button and is published as the plain HTTP app
+`picar-stream`, with no `/mcp` on it. A viewer who can open `picar-stream` can watch and stop the car, never drive
+it. The `picar-stream` role grants that app; add it next to `picar-viewer` or `picar-driver` for the video panel.
+
 ## Try it with no robot (2 minutes)
 
 The simulator has the same six tools, a camera and telemetry as the real car, so everything below works without
@@ -45,10 +51,10 @@ hardware. Pick where the fake robot lives:
 
 ```bash
 pip install "mcp>=1.9,<2" uvicorn pillow fastapi httpx anthropic "psycopg[binary]" redis
-SIMULATE=1 python3 robot/robot_mcp.py &          # a fake car in a 4 m x 3 m room with two desks, port 8765
+SIMULATE=1 python3 robot/robot_mcp.py &          # a fake car in a 4 m x 3 m room with two desks: MCP on 8765, video/telemetry on 8766
 
 cd beam-app
-ROBOT_MCP_URL=http://127.0.0.1:8765/mcp ROBOT_STREAM_URL=http://127.0.0.1:8765 \
+ROBOT_MCP_URL=http://127.0.0.1:8765/mcp ROBOT_STREAM_URL=http://127.0.0.1:8766 \
 OPENAI_API_KEY=... python3 -m uvicorn app:app --port 8080     # or LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=...
 ```
 
@@ -72,7 +78,7 @@ tsh beams ssh <beam>
 tar xzf beambot.tgz 2>/dev/null && cd picar-beambot
 python3 -m pip install --user --break-system-packages -q "mcp>=1.9,<2" uvicorn pillow fastapi httpx anthropic
 (cd robot && SIMULATE=1 SAY_CMD=true nohup python3 robot_mcp.py >/tmp/robot.log 2>&1 &)
-cd beam-app && ROBOT_MCP_URL=http://127.0.0.1:8765/mcp ROBOT_STREAM_URL=http://127.0.0.1:8765 \
+cd beam-app && ROBOT_MCP_URL=http://127.0.0.1:8765/mcp ROBOT_STREAM_URL=http://127.0.0.1:8766 \
   nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8080 >/tmp/app.log 2>&1 &
 ```
 ```bash
@@ -107,8 +113,8 @@ BEAM_ROLES=beam-user,mcp-user ROBOT_STREAM_APP= ./deploy-beam.sh        # prints
 - `mcp-user` (built in) matches every MCP app, so the beam sees `picar-mcp` with all tools. It doesn't match the
   video app, hence `ROBOT_STREAM_APP=` (no live video panel).
 - For video and a tool tier, create the roles once (`tctl create -f ../teleport/roles.yaml`) and use
-  `BEAM_ROLES=beam-user,picar-driver` (all tools plus video) or `beam-user,picar-viewer` (look only: drive, aim and
-  speak show up locked).
+  `BEAM_ROLES=beam-user,picar-driver,picar-stream` (all tools plus video) or `beam-user,picar-viewer,picar-stream`
+  (look only: drive, aim and speak show up locked).
 - Check what the beam can reach with `tsh beams exec <beam> tsh mcp ls`.
 
 ### Tests
@@ -129,7 +135,7 @@ repo has a suite that needs no cluster: `make test` from the repository root.
 1. Confirm one of SunFounder's examples drives the car (SunFounder path), or run
    `python3 robot/motor_test.py all` to bench-check motors and servos (HAT path; stop the service first, it owns the HAT).
 2. Copy `robot/` to the Pi and `pip3 install -r robot/requirements.txt` (`--break-system-packages` on Bookworm).
-   Smoke test: `sudo python3 robot_mcp.py`, then `curl localhost:8765/telemetry`.
+   Smoke test: `sudo python3 robot_mcp.py`, then `curl localhost:8766/telemetry`.
 3. Install as a service: `robot/picar-robot.service` (SunFounder path) or `robot/picar-robot-hat.service`
    (HAT path; its header lists the packages, groups and camera udev rule it needs). Then
    `sudo systemctl enable --now picar-robot`.
@@ -144,8 +150,21 @@ Expect drift of tens of centimetres after a few minutes.
 ### Safety limits (enforced on the robot, whoever calls)
 
 Speed ≤ `MAX_SPEED` (40/100), each move ≤ `MAX_DRIVE_SECONDS` (3 s), forward motion stopped under
-`OBSTACLE_STOP_CM` (20 cm), and a red STOP button in the UI. Tune with environment variables in the service
-file. These are deliberately not tool arguments.
+`OBSTACLE_STOP_CM` (20 cm). Tune with environment variables in the service file. These are deliberately not tool arguments.
+
+The robot also fails safe when hardware misbehaves:
+
+- Every `drive` stops at its own deadline, and the 20 Hz control loop survives a failed I2C write and keeps
+  retrying the stop until it works.
+- Forward motion needs a **valid, fresh** ultrasonic reading (`SENSOR_MAX_AGE_S`, 0.5 s). A `-1`/`None` reading (no echo,
+  or a dead sensor) counts as "unknown", so forward drives are refused and a forward move in progress stops. Reverse is
+  unaffected. The sensor only hears something within about 3 m, so in a large empty space set `ALLOW_BLIND_FORWARD=1`
+  if you accept driving without it.
+- The motors are zeroed at startup, on SIGTERM and at exit.
+
+**STOP** in the dashboard cancels the running chat job and the auto-mapper, stops the car (through the stream app, or the
+MCP `stop` tool if there is none), and **halts** the dashboard: it refuses every robot call except `stop` until you press
+**Resume**. If the stop could not reach the robot the page says so.
 
 ## Put it on Teleport
 
@@ -172,12 +191,17 @@ tsh apps ls           # picar-stream
 opens its tunnels with the beam's own `tsh`. Nothing to enroll:
 
 ```bash
-cd beam-app && BEAM_ROLES=beam-user,picar-driver,beambot-data ./deploy-beam.sh           # new beam → upload → start in tmux → wait for :8080 → tsh beams publish
+cd beam-app && BEAM_ROLES=beam-user,picar-driver,picar-stream,beambot-data ./deploy-beam.sh           # new beam → upload → start in tmux → wait for :8080 → tsh beams publish
 BEAM=<name> ./deploy-beam.sh               # redeploy into an existing beam
 ```
 
 Robot calls appear in the audit log as you plus the beam's workload identity. Beams expire after 12 hours by default, so the URL changes.
-`BEAM_ROLES` is required: a beam holds only the roles you list (they must be delegable), never your admin ones. `beam-user` is what lets the dashboard (and Claude Code) call models inside the beam: leave it out and every chat fails with a Teleport login redirect. `beambot-data` (in `teleport/roles.yaml`) is what lets it reach Postgres and Redis; drop it for SQLite only. Want the viewer experience? `BEAM_ROLES=beam-user,picar-viewer,beambot-data ./deploy-beam.sh`: the drive tools show as locked. Check what a beam holds with `tsh beams exec <beam> tsh status`.
+`BEAM_ROLES` is required: a beam holds only the roles you list (they must be delegable), never your admin ones. `beam-user` is what lets the dashboard (and Claude Code) call models inside the beam: leave it out and every chat fails with a Teleport login redirect. `beambot-data` (in `teleport/roles.yaml`) is what lets it reach Postgres and Redis; drop it for SQLite only. Want the viewer experience? `BEAM_ROLES=beam-user,picar-viewer,picar-stream,beambot-data ./deploy-beam.sh`: the drive tools show as locked. Check what a beam holds with `tsh beams exec <beam> tsh status`.
+
+**Who can open the published URL?** It is a Teleport-protected app, so a visitor signs in to Teleport first. The Teleport
+docs don't say which users are let in, so check that before you share the link. The dashboard has no login of its own and
+acts with the *beam's roles*, not the visitor's: whoever gets in can do whatever the beam can. A `picar-driver` beam lets
+every visitor drive. For a shared link deploy with `picar-viewer` (and `picar-stream`); keep driver beams unpublished and short-lived.
 
 No Pi handy, or want it available while your laptop sleeps? [`k8s/`](k8s/README.md) runs the simulator in a Kubernetes cluster with its own Teleport agent.
 
@@ -211,6 +235,8 @@ The bot (or user) needs a Teleport role granting access to those databases. The 
 | `ROBOT_TOOLS` | all six | which tools the UI shows as granted vs. locked |
 | `BEAM_EXPIRES` | unset | shown in the UI; copy it from `tsh beams ls` |
 | `MAX_SPEED`, `MAX_DRIVE_SECONDS`, `OBSTACLE_STOP_CM` | 40, 3, 20 | robot-side safety limits |
+| `SENSOR_MAX_AGE_S`, `ALLOW_BLIND_FORWARD` | 0.5, off | robot-side: how old an ultrasonic reading may be; `1` allows forward motion without one |
+| `ROBOT_PORT`, `STREAM_PORT` | 8765, 8766 | robot-side: the MCP port and the video/telemetry/stop port (no `/mcp` there) |
 
 ## Tasks, Auto map and the Beams tour
 

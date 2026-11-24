@@ -12,7 +12,7 @@
 #   LLM_PROVIDER=openai    openai (default) | anthropic
 #   LLM_MODEL=...          override the model (default gpt-6.1-sol / claude-sonnet-5-5)
 #   READY_TIMEOUT=180      seconds to wait for :8080 (start.sh runs pip install first)
-#   BEAM_ROLES=beam-user,picar-driver,beambot-data   REQUIRED for a new beam: the only roles it will hold (tsh beams add
+#   BEAM_ROLES=beam-user,picar-driver,picar-stream,beambot-data   REQUIRED for a new beam: the only roles it will hold (tsh beams add
 #                          --roles). They must be eligible for delegation. Without this a beam would inherit ALL
 #                          your standing roles (access, editor, auditor...). INHERIT_ROLES=1 opts in to that anyway.
 #                          Ignored with BEAM=.
@@ -35,8 +35,14 @@ command -v jq  >/dev/null || die "jq not found"
 
 # ── beam ─────────────────────────────────────────────────────────────────────
 if [[ -z "${BEAM:-}" ]]; then
+  # A blank list must count as "not set", never reach `tsh beams add --roles=" "` (what that does is up to tsh: it
+  # may give the beam every role you hold). Whitespace is stripped; empty entries are an error.
+  BEAM_ROLES="${BEAM_ROLES:-}"; BEAM_ROLES="${BEAM_ROLES//[[:space:]]/}"
+  if [[ -n "$BEAM_ROLES" && ( "$BEAM_ROLES" == ,* || "$BEAM_ROLES" == *, || "$BEAM_ROLES" == *,,* ) ]]; then
+    die "BEAM_ROLES has an empty entry ('$BEAM_ROLES'): write it as role-a,role-b"
+  fi
   if [[ -z "${BEAM_ROLES:-}" && "${INHERIT_ROLES:-0}" != "1" ]]; then
-    die "set BEAM_ROLES (e.g. BEAM_ROLES=beam-user,picar-driver,beambot-data; beam-user is what allows model calls): otherwise the beam inherits ALL your roles, admin ones included. INHERIT_ROLES=1 to do that anyway."
+    die "set BEAM_ROLES (e.g. BEAM_ROLES=beam-user,picar-driver,picar-stream,beambot-data; beam-user is what allows model calls): otherwise the beam inherits ALL your roles, admin ones included. INHERIT_ROLES=1 to do that anyway."
   fi
   log "Creating beam with roles: ${BEAM_ROLES:-<all of yours>}"
   raw=$(tsh beams add -f json ${BEAM_ROLES:+--roles="$BEAM_ROLES"} 2>&1) || die "tsh beams add failed: ${raw}"

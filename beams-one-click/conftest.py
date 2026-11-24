@@ -51,12 +51,14 @@ def _clean_env(**extra):
 # --------------------------------------------------------------------------- simulated robot
 @pytest.fixture(scope="session")
 def robot():
-    port = free_port()
+    port, stream_port = free_port(), free_port()
     p = subprocess.Popen([sys.executable, str(ROBOT_DIR / "robot_mcp.py")], cwd=ROBOT_DIR,
-                         env=_clean_env(SIMULATE=1, ROBOT_PORT=port, SAY_CMD="true"),
+                         env=_clean_env(SIMULATE=1, ROBOT_PORT=port, STREAM_PORT=stream_port, SAY_CMD="true"),
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    wait_http(f"http://127.0.0.1:{port}/telemetry")
-    yield SimpleNamespace(port=port, base=f"http://127.0.0.1:{port}", mcp=f"http://127.0.0.1:{port}/mcp")
+    wait_http(f"http://127.0.0.1:{stream_port}/telemetry")
+    # `base` is the stream app (video, telemetry, stop: what picar-stream publishes), `mcp` the MCP endpoint.
+    yield SimpleNamespace(port=port, stream_port=stream_port, base=f"http://127.0.0.1:{stream_port}",
+                          mcp=f"http://127.0.0.1:{port}/mcp", mcp_base=f"http://127.0.0.1:{port}")
     p.terminate()
     p.wait(5)
 

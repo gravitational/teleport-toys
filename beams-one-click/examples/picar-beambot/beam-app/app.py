@@ -228,6 +228,20 @@ class Store:
 store = Store()
 
 
+def _num(v, default=0):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else default
+
+
+def clean_activity(x):
+    """A feed item with every field forced to its expected type, or None if it is not an item at all."""
+    if not isinstance(x, dict) or not isinstance(x.get("tool"), str):
+        return None
+    inp = x.get("input")
+    return {"ts": _num(x.get("ts")), "tool": x["tool"][:64], "input": inp if isinstance(inp, dict) else {},
+            "ok": x.get("ok") is True, "ms": int(_num(x.get("ms"))),
+            "detail": x["detail"][:160] if isinstance(x.get("detail"), str) else ""}
+
+
 class Cache:
     """Optional Redis (via Teleport tunnel): shared activity feed + latest telemetry that survive app restarts."""
     def __init__(self):
@@ -251,7 +265,18 @@ class Cache:
     def activity(self, n=25):
         if self.r:
             try:
-                return [json.loads(x) for x in self.r.lrange("beambot:activity", 0, n - 1)]
+                # The feed lives in a shared Redis: any identity with `beambot-data` can write to it. Rebuild every
+                # item from typed fields and drop what doesn't fit, so nothing but numbers, booleans and short
+                # strings ever reaches the page.
+                items = []
+                for raw in self.r.lrange("beambot:activity", 0, n - 1):
+                    try:
+                        item = clean_activity(json.loads(raw))
+                    except ValueError:      # one bad entry must not hide the rest
+                        continue
+                    if item:
+                        items.append(item)
+                return items
             except Exception:  # noqa: BLE001
                 pass
         return None
@@ -585,12 +610,24 @@ def prune_old_images(keep_last=2):
 jobs = {}
 _job_tasks = set()   # keep references so running jobs aren't garbage collected
 
+# Emergency stop latches: once STOP is pressed no robot call (except `stop`) is made until the user resumes.
+halt = {"on": False, "at": None}
+HALT_MSG = "Emergency stop is active: the robot will not move until you press Resume."
+
+
+class Halted(Exception):
+    pass
+
 
 async def run_job(job, message, task):
     async with chat_lock:  # one robot, one conversation at a time
         start = len(history)
         try:
             job.update(status="done", **await run_agent(message, task, job["trace"]))
+        except asyncio.CancelledError:  # the STOP button
+            del history[start:]
+            job.update(status="stopped", detail="Stopped: the emergency stop cancelled this run.")
+            raise
         except Exception as e:  # noqa: BLE001
             del history[start:]  # never leave a dangling tool_use in history
             job.update(status="error", detail=why(e))
@@ -600,6 +637,8 @@ async def run_job(job, message, task):
 async def chat(req: Request):
     body = await req.json()
     task = TASKS.get(body.get("task"), TASKS["count"])
+    if halt["on"]:
+        return JSONResponse({"detail": HALT_MSG}, status_code=423)
     if chat_lock.locked():
         return JSONResponse({"detail": "BeamBot is still working on the previous message."}, status_code=409)
     job_id = uuid.uuid4().hex[:12]
@@ -794,12 +833,16 @@ async def run_agent(message, task, trace=None):
                         elif b.name == "get_map_summary":
                             content = [{"type": "text", "text": json.dumps(office_map.summary())}]
                         else:
+                            if halt["on"] and b.name != "stop":
+                                raise Halted(HALT_MSG)
                             if b.name == "drive":
                                 auto_mapper.stop("chat agent took over")
                             res = await session.call_tool(b.name, b.input)
                             content = mcp_content_to_claude(res)
                             first = next((c["text"] for c in content if c["type"] == "text"), "image")
                             log_activity(b.name, b.input, not res.isError, round((time.time() - t0) * 1000), first)
+                    except Halted:
+                        raise   # end the run: do not hand an error back to the model and let it try again
                     except Exception as e:  # noqa: BLE001
                         if via == "teleport-mcp":
                             log_activity(b.name, b.input, False, round((time.time() - t0) * 1000), str(e))
@@ -839,14 +882,43 @@ async def reset(req: Request):
 
 @app.post("/api/stop")
 async def stop():
+    """Emergency stop: latch `halt`, end everything that could move the robot, then stop the motors.
+    The fast path is the stream app's /stop; without a stream app (or if it fails) the MCP `stop` tool does it.
+    Only a 200 means the robot was told to stop: anything else is reported as an error."""
+    halt.update(on=True, at=time.time())
+    manual_stop["gen"] += 1
     auto_mapper.stop("emergency stop")
-    async with httpx.AsyncClient(timeout=3) as http:
-        r = await http.post(f"{ROBOT_STREAM_URL}/stop")
-    return r.json()
+    running = [t for t in _job_tasks if not t.done()]
+    for t in running:
+        t.cancel()
+    if running:   # wait for them to let go, so no already-issued drive lands after the stop below
+        await asyncio.wait(running, timeout=3)
+    errors = []
+    try:
+        async with httpx.AsyncClient(timeout=3) as http:
+            r = await http.post(f"{ROBOT_STREAM_URL}/stop")
+        r.raise_for_status()
+        return {"ok": True, "halted": True, "via": "stream", "result": r.json().get("result", "stopped")}
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"stream app: {why(e)}")
+    resp = await robot_call("stop", {})
+    body = json.loads(resp.body)
+    if body.get("ok"):
+        return {"ok": True, "halted": True, "via": "mcp", "result": body.get("result", "stopped")}
+    errors.append(f"MCP stop: {body.get('error') or body.get('result')}")
+    return JSONResponse({"ok": False, "halted": True, "error": "; ".join(errors)}, status_code=502)
+
+
+@app.post("/api/resume")
+async def resume():
+    halt.update(on=False, at=None)
+    return {"ok": True, "halted": False}
 
 
 async def robot_call(tool, args):
     """One robot MCP tool call through Teleport, logged like the agent's calls."""
+    if halt["on"] and tool != "stop":
+        return JSONResponse({"ok": False, "halted": True, "error": HALT_MSG}, status_code=423)
     t0 = time.time()
     try:
         async with streamablehttp_client(ROBOT_MCP_URL) as (r, w, _):
@@ -895,6 +967,8 @@ async def manual_drive_stop():
 
 async def auto_call(tool, args):
     """Robot MCP call for the auto-mapper: same Teleport path and activity log as the agent, prefixed `auto:`."""
+    if halt["on"] and tool != "stop":
+        return False, HALT_MSG
     t0 = time.time()
     try:
         async with streamablehttp_client(ROBOT_MCP_URL) as (r, w, _):
@@ -913,6 +987,8 @@ async def auto_call(tool, args):
 async def automap_start(req: Request):
     """Body (all optional): speed 15-40, max_moves, max_minutes, vision (camera + model during scans, default on)."""
     b = await req.json() if (await req.body()) else {}
+    if halt["on"]:
+        return JSONResponse({"ok": False, "error": HALT_MSG}, status_code=423)
     on_view = describe_view if b.get("vision", True) else None
     if not auto_mapper.start(auto_call, speed=b.get("speed"), max_moves=b.get("max_moves"),
                              max_minutes=b.get("max_minutes"), on_view=on_view):
@@ -973,7 +1049,7 @@ async def state():
     return {"telemetry": dict(office_map.telemetry), "grid": office_map.encoded(), "grid_size": GRID,
             "cell_cm": CELL_CM, "tally": tally(), "map": office_map.summary(), "auto": auto_mapper.status,
             "landmarks": office_map.landmarks, "hazards": office_map.hazards[-5:], "loaded_map": office_map.loaded,
-            "vision": vision}
+            "vision": vision, "halted": halt["on"]}
 
 
 @app.get("/api/video")

@@ -125,6 +125,22 @@ def test_deploy_refuses_to_create_a_beam_that_inherits_everything(teleport):
     assert teleport.calls("tsh", "beams", "add") == []
 
 
+@pytest.mark.parametrize("blank", ["", " ", "  \t", ",", " , "])
+def test_deploy_treats_a_blank_role_list_as_not_set(teleport, blank):
+    """`--roles=" "` may give the beam every role you hold, so a blank list must never reach tsh."""
+    r = deploy(teleport, BEAM_ROLES=blank)
+    assert r.returncode != 0 and ("BEAM_ROLES" in r.stderr)
+    assert teleport.calls("tsh", "beams", "add") == []
+
+
+def test_deploy_rejects_empty_role_entries_and_strips_spaces(teleport):
+    assert deploy(teleport, BEAM_ROLES="beam-user,,picar-viewer").returncode != 0
+    assert teleport.calls("tsh", "beams", "add") == []
+    r = deploy(teleport, BEAM_ROLES=" beam-user, picar-viewer ")
+    assert r.returncode == 0, r.stderr
+    assert "--roles=beam-user,picar-viewer" in teleport.calls("tsh", "beams", "add")[0]["args"]
+
+
 def test_deploy_can_inherit_when_explicitly_asked(teleport):
     r = deploy(teleport, INHERIT_ROLES=1)
     assert r.returncode == 0 and not any(a.startswith("--roles") for a in teleport.calls("tsh", "beams", "add")[0]["args"])

@@ -1,42 +1,62 @@
 """
 BeamBot robot server — runs ON the PiCar-X (Raspberry Pi).
 
-One process, one port (127.0.0.1:8765), two faces:
-  /mcp          Streamable-HTTP MCP server (drive, turn, look, snapshot, telemetry, say)
-  /video.mjpg   Live MJPEG camera stream          (for the Beam app's VIDEO panel)
-  /telemetry    JSON: pose, ultrasonic, grayscale  (for the DATA + OFFICE MAP panels)
+One process, two ports on 127.0.0.1, so Teleport can grant them separately:
+  :8765  /mcp          Streamable-HTTP MCP server (drive, look, stop, snapshot, get_telemetry, say)
+                       published as the MCP app `picar-mcp`; Teleport filters its tools per role
+  :8766  /video.mjpg   Live MJPEG camera stream          (for the Beam app's VIDEO panel)
+         /snapshot.jpg  One JPEG frame
+         /telemetry    JSON: pose, ultrasonic, grayscale  (for the DATA + OFFICE MAP panels)
+         /stop         POST: stop the motors (the only thing here that acts)
+                       published as the plain HTTP app `picar-stream`. There is deliberately no /mcp here:
+                       `mcp.tools` in a Teleport role only filters MCP apps, so anything on this port is
+                       reachable by whoever may open the app. It can watch and stop, never drive.
 
-Teleport's Application Service on the Pi publishes both faces into the cluster.
+Teleport's Application Service on the Pi publishes both ports into the cluster.
 Nothing listens on a public interface.
+
+Safety on the robot, whoever calls: speed and duration are clamped, forward motion needs a fresh valid
+ultrasonic reading, every drive stops at its own deadline, the control loop survives hardware errors
+and retries the stop, and the motors are zeroed at startup and on SIGTERM / exit.
 
 Run on the robot:      python3 robot_mcp.py            (SunFounder picarx + picamera2)
                        HW=hat python3 robot_mcp.py     (robot_hat_lite.py + libcamera/GStreamer, no SunFounder libs)
 Run without hardware:  SIMULATE=1 python3 robot_mcp.py
 """
 import asyncio
+import atexit
 import io
 import math
 import os
 import re
 import shlex
+import signal
 import subprocess
+import sys
 import threading
 import time
 
 from mcp.server.fastmcp import FastMCP, Image
+from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.routing import Route
 
 SIMULATE = os.environ.get("SIMULATE") == "1"
 HW = "sim" if SIMULATE else os.environ.get("HW", "picarx")   # picarx | hat
 HOST = os.environ.get("ROBOT_HOST", "127.0.0.1")
-PORT = int(os.environ.get("ROBOT_PORT", "8765"))
+PORT = int(os.environ.get("ROBOT_PORT", "8765"))                # /mcp only
+STREAM_PORT = int(os.environ.get("STREAM_PORT", "8766"))        # video, telemetry, stop: no /mcp
 
 # ---- Safety limits (enforced here, on the robot, regardless of who calls) ----
 MAX_SPEED = int(os.environ.get("MAX_SPEED", "40"))          # picarx speed units (0-100)
 MAX_DRIVE_SECONDS = float(os.environ.get("MAX_DRIVE_SECONDS", "3"))
 OBSTACLE_STOP_CM = float(os.environ.get("OBSTACLE_STOP_CM", "20"))
 MAX_STEER_DEG = 30
+# Forward motion needs a valid ultrasonic echo no older than this. A -1 / None reading (no echo, or a dead
+# sensor) is "unknown", not "clear". Set ALLOW_BLIND_FORWARD=1 only if you accept driving without the sensor.
+SENSOR_MAX_AGE_S = float(os.environ.get("SENSOR_MAX_AGE_S", "0.5"))
+ALLOW_BLIND_FORWARD = os.environ.get("ALLOW_BLIND_FORWARD") == "1"
 # Speaker: text is appended as the last argument. espeak-ng plays straight to ALSA (the Robot HAT speaker).
 SAY_CMD = os.environ.get("SAY_CMD", "espeak-ng -a 200 -s 150 -v en")
 
@@ -101,6 +121,8 @@ class Robot:
         self.drive_until = 0.0
         self.drive_gen = 0  # bumped per drive() so an older call doesn't straighten a newer one's steering
         self.last_event = "ready"
+        self.distance_ok_at = 0.0   # when the ultrasonic last gave a valid (> 0) reading
+        self.need_stop = False      # a stop was requested but the hardware call failed: retry every pass
 
         if SIMULATE:
             self.car = SimCar()
@@ -119,6 +141,12 @@ class Robot:
             self.camera.start()
 
         self.frame = b""
+        try:                        # a previous run may have left the motors spinning
+            self.car.stop()
+            self.car.set_dir_servo_angle(0)
+        except Exception as e:  # noqa: BLE001
+            self.need_stop = True   # the control loop keeps retrying
+            self.last_event = f"startup stop failed: {e}"
         threading.Thread(target=self._control_loop, daemon=True).start()
         threading.Thread(target=self._camera_loop, daemon=True).start()
 
@@ -129,6 +157,14 @@ class Robot:
         d = self.car.ultrasonic.read()
         return round(float(d), 1) if d is not None else -1.0
 
+    def _forward_blocked(self, now):
+        """Why forward motion is not allowed right now, or None. Fails closed: no valid reading = blocked."""
+        if 0 < self.distance < OBSTACLE_STOP_CM:
+            return f"obstacle at {self.distance} cm"
+        if not ALLOW_BLIND_FORWARD and (self.distance <= 0 or now - self.distance_ok_at > SENSOR_MAX_AGE_S):
+            return "no valid distance reading (ultrasonic unavailable)"
+        return None
+
     # ---- 20 Hz loop: integrate pose, read sensors, enforce safety ----
     def _control_loop(self):
         last = time.time()
@@ -137,26 +173,48 @@ class Robot:
             now = time.time()
             dt = now - last
             last = now
-            with self.lock:
+            try:
+                self._tick(now, dt)
+            except Exception as e:  # noqa: BLE001  one bad pass (an I2C error, say) must never end this loop
+                self.last_event = f"control loop error: {e}"
+                self.need_stop = True
                 try:
-                    self.distance = self._read_distance()
-                    self.grayscale = list(self.car.get_grayscale_data())
-                except Exception as e:  # noqa: BLE001
-                    self.last_event = f"sensor error: {e}"
+                    with self.lock:
+                        self._stop("control loop error")
+                except Exception:  # noqa: BLE001  need_stop is set: the next pass tries again
+                    pass
 
-                if self.speed != 0 and now >= self.drive_until:
-                    self._stop("drive time elapsed")
-                if self.speed > 0 and 0 < self.distance < OBSTACLE_STOP_CM:
-                    self._stop(f"obstacle at {self.distance} cm")
+    def _tick(self, now, dt):
+        with self.lock:
+            try:
+                self.distance = self._read_distance()
+                if self.distance > 0:
+                    self.distance_ok_at = now
+            except Exception as e:  # noqa: BLE001
+                self.distance = -1.0        # never leave the last good value in place: it would look like a clear path
+                self.last_event = f"sensor error: {e}"
+            try:
+                self.grayscale = list(self.car.get_grayscale_data())
+            except Exception as e:  # noqa: BLE001
+                self.last_event = f"grayscale error: {e}"
 
-                if self.speed != 0:
-                    v = self.speed * CM_PER_SEC_PER_SPEED
-                    self.th += (v / WHEELBASE_CM) * math.tan(math.radians(self.steer)) * dt
-                    self.x += v * math.cos(self.th) * dt
-                    self.y += v * math.sin(self.th) * dt
-                    if math.dist(self.path[-1], (self.x, self.y)) > 3:
-                        self.path.append((round(self.x, 1), round(self.y, 1)))
-                        self.path = self.path[-2000:]
+            if self.need_stop:
+                self._stop("retrying stop")
+            if self.speed != 0 and now >= self.drive_until:
+                self._stop("drive time elapsed")
+            if self.speed > 0:
+                why = self._forward_blocked(now)
+                if why:
+                    self._stop(why)
+
+            if self.speed != 0:
+                v = self.speed * CM_PER_SEC_PER_SPEED
+                self.th += (v / WHEELBASE_CM) * math.tan(math.radians(self.steer)) * dt
+                self.x += v * math.cos(self.th) * dt
+                self.y += v * math.sin(self.th) * dt
+                if math.dist(self.path[-1], (self.x, self.y)) > 3:
+                    self.path.append((round(self.x, 1), round(self.y, 1)))
+                    self.path = self.path[-2000:]
 
     def _camera_loop(self):
         while True:
@@ -199,38 +257,78 @@ class Robot:
 
     # ---- actuators ----
     def _stop(self, why):
+        """Stop the motors. If the hardware call fails the exception propagates and need_stop stays set,
+        so the control loop retries on every pass until it works."""
+        self.need_stop = True
         self.car.stop()
         self.car.set_dir_servo_angle(0)
         self.speed = 0
         self.steer = 0
+        self.need_stop = False
         self.last_event = f"stopped: {why}"
+
+    def shutdown(self):
+        """Zero the motors at exit / SIGTERM."""
+        for _ in range(5):
+            try:
+                with self.lock:
+                    self._stop("shutting down")
+                return
+            except Exception:  # noqa: BLE001
+                time.sleep(0.05)
+
+    def _deadline(self, gen):
+        """Stop at this drive's own deadline, whether or not the control loop is healthy."""
+        with self.lock:
+            if gen == self.drive_gen and (self.speed != 0 or self.need_stop):
+                self._stop("drive time elapsed")
 
     def drive(self, speed, seconds, steer, wait=True):
         speed = max(-MAX_SPEED, min(MAX_SPEED, int(speed)))
         seconds = max(0.1, min(MAX_DRIVE_SECONDS, float(seconds)))
         steer = max(-MAX_STEER_DEG, min(MAX_STEER_DEG, int(steer)))
         with self.lock:
-            if speed > 0 and 0 < self.distance < OBSTACLE_STOP_CM:
-                return f"refused: obstacle at {self.distance} cm"
-            self.car.set_dir_servo_angle(steer)
-            self.steer = steer
-            if speed >= 0:
-                self.car.forward(speed)
-            else:
-                self.car.backward(-speed)
+            if speed > 0:
+                why = self._forward_blocked(time.time())
+                if why:
+                    return f"refused: {why}"
+            try:
+                self.car.set_dir_servo_angle(steer)
+                self.steer = steer
+                if speed >= 0:
+                    self.car.forward(speed)
+                else:
+                    self.car.backward(-speed)
+            except Exception:
+                self.need_stop = True       # a half-applied command (one motor on) must not stay on
+                try:
+                    self._stop("drive failed")
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
             self.speed = speed
             self.drive_until = time.time() + seconds
             self.drive_gen += 1
             gen = self.drive_gen
             self.last_event = f"driving speed={speed} steer={steer} for {seconds}s"
-            if not wait:   # manual control: return now, the control loop stops it when time is up
+            timer = threading.Timer(seconds, self._deadline_safely, (gen,))
+            timer.daemon = True
+            timer.start()
+            if not wait:   # manual control: return now, the deadline timer / control loop stops it
                 return self.last_event
         time.sleep(seconds + 0.1)
+        self._deadline(gen)
         with self.lock:
             if gen == self.drive_gen:
                 self.car.set_dir_servo_angle(0)
                 self.steer = 0
             return self.last_event
+
+    def _deadline_safely(self, gen):
+        try:
+            self._deadline(gen)
+        except Exception as e:  # noqa: BLE001  need_stop is set, the control loop retries
+            self.last_event = f"deadline stop failed: {e}"
 
     def look(self, pan, tilt):
         pan = max(-90, min(90, int(pan)))
@@ -343,19 +441,17 @@ def snapshot() -> Image:
     return Image(data=robot.frame, format="jpeg")
 
 
-# ---- Stream endpoints for the dashboard (same port, served as a Teleport HTTP app) ----
-@mcp.custom_route("/telemetry", methods=["GET"])
+# ---- Stream app: a second port, deliberately without /mcp ----
+# Published to Teleport as the plain HTTP app `picar-stream`. Teleport's `mcp.tools` only filters MCP apps, so
+# anything on this port is open to whoever may open the app: it can show telemetry and video and stop the car.
 async def telemetry_route(request: Request):
     return JSONResponse(robot.telemetry())
 
 
-@mcp.custom_route("/snapshot.jpg", methods=["GET"])
 async def snapshot_route(request: Request):
-    from starlette.responses import Response
     return Response(robot.frame, media_type="image/jpeg")
 
 
-@mcp.custom_route("/video.mjpg", methods=["GET"])
 async def video_route(request: Request):
     async def gen():
         last, sent_at = None, 0.0
@@ -372,11 +468,33 @@ async def video_route(request: Request):
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
-@mcp.custom_route("/stop", methods=["POST"])
 async def stop_route(request: Request):
     return JSONResponse({"result": robot.emergency_stop()})
 
 
+stream_app = Starlette(routes=[
+    Route("/telemetry", telemetry_route, methods=["GET"]),
+    Route("/snapshot.jpg", snapshot_route, methods=["GET"]),
+    Route("/video.mjpg", video_route, methods=["GET"]),
+    Route("/stop", stop_route, methods=["POST"]),
+])
+
+
+def serve_stream():
+    import uvicorn
+    server = uvicorn.Server(uvicorn.Config(stream_app, host=HOST, port=STREAM_PORT, log_level="warning"))
+    threading.Thread(target=server.run, name="stream", daemon=True).start()
+
+
+def _on_sigterm(signum, frame):
+    robot.shutdown()
+    sys.exit(0)
+
+
 if __name__ == "__main__":
-    print(f"BeamBot robot server on http://{HOST}:{PORT}  (MCP at /mcp, simulate={SIMULATE})")
+    atexit.register(robot.shutdown)
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    serve_stream()
+    print(f"BeamBot robot server: MCP on http://{HOST}:{PORT}/mcp, stream on http://{HOST}:{STREAM_PORT} "
+          f"(video, telemetry, stop; no /mcp), simulate={SIMULATE}")
     mcp.run(transport="streamable-http")

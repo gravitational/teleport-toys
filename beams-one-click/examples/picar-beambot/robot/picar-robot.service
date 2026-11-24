@@ -8,6 +8,8 @@ User=root
 WorkingDirectory=/home/pi/picar-beambot/robot
 ExecStart=/usr/bin/python3 /home/pi/picar-beambot/robot/robot_mcp.py
 Restart=on-failure
+# However the server ends (crash, SIGKILL, OOM), the HAT would keep its last PWM duty: zero the motors afterwards.
+ExecStopPost=-/usr/bin/python3 -c "from picarx import Picarx; Picarx().stop()"
 Environment=MAX_SPEED=40
 Environment=OBSTACLE_STOP_CM=20
 

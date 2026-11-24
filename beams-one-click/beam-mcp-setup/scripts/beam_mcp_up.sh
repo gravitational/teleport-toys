@@ -33,6 +33,12 @@ if [[ -n "$VER" && "$(printf '%s\n18.11.9\n' "$VER" | sort -V | head -1)" != "18
 fi
 
 if [[ -z "$BEAM" ]]; then
+  # A blank list counts as "not given" (never `--roles=" "`: tsh may then give the beam all your roles).
+  ROLES="${ROLES//[[:space:]]/}"
+  if [[ -n "$ROLES" && ( "$ROLES" == ,* || "$ROLES" == *, || "$ROLES" == *,,* ) ]]; then
+    echo "Error: --roles has an empty entry ('$ROLES'): write it as role-a,role-b" >&2
+    exit 2
+  fi
   if [[ -z "$ROLES" && -z "$INHERIT" ]]; then
     echo "Error: pass --roles <role,role> (include beam-user so the beam can call models): without it the beam inherits ALL your roles (admin ones included). Use --inherit-roles to do that anyway." >&2
     exit 2

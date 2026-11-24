@@ -181,3 +181,19 @@ class GstCamera:
             except Exception as e:  # noqa: BLE001
                 self.error = f"camera error: {e}"
             time.sleep(2)
+
+
+def main(argv):
+    """`python3 robot_hat_lite.py stop` zeroes the motors. systemd runs it after the server exits for any reason
+    (ExecStopPost), because the HAT's own timers keep the last PWM duty until something writes a new one."""
+    if argv == ["stop"]:
+        Hat().stop()
+        print("motors stopped")
+        return 0
+    print("usage: python3 robot_hat_lite.py stop")
+    return 2
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main(sys.argv[1:]))

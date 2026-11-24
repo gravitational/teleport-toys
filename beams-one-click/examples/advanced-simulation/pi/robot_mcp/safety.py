@@ -119,13 +119,20 @@ def start_listener():
 def timed(duration_ms, start_fn, stop_fn):
     """Run start_fn now and stop_fn after duration_ms (clamped). Blocks until done."""
     duration_ms = max(0, min(int(duration_ms), MAX_MOTION_MS))
-    start_fn()
-    deadline = time.monotonic() + duration_ms / 1000.0
     try:
+        # start_fn is inside the try: if it fails half way (the first motor written, the second not), stop_fn
+        # still runs and de-energizes whatever did start.
+        start_fn()
+        deadline = time.monotonic() + duration_ms / 1000.0
         while time.monotonic() < deadline:
             if state()["estopped"]:
                 break
             time.sleep(0.02)
     finally:
-        stop_fn()
+        try:
+            stop_fn()
+        except Exception:  # a transient bus error: one more try before giving up loudly
+            log.exception("stop_fn failed, retrying")
+            time.sleep(0.05)
+            stop_fn()
     return duration_ms

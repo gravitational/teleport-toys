@@ -17,6 +17,8 @@ WorkingDirectory=/opt/picar-beambot
 ExecStart=/opt/picar-beambot/venv/bin/python /opt/picar-beambot/robot_mcp.py
 Restart=on-failure
 RestartSec=2
+# However the server ends (crash, SIGKILL, OOM), the HAT would keep its last PWM duty: zero the motors afterwards.
+ExecStopPost=-/opt/picar-beambot/venv/bin/python /opt/picar-beambot/robot_hat_lite.py stop
 Environment=HW=hat
 Environment=MAX_SPEED=40
 Environment=OBSTACLE_STOP_CM=20

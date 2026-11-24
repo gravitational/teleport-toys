@@ -5,7 +5,7 @@ and telemetry) in a local Kubernetes cluster and a **Teleport agent** next to it
 Afterwards `picar-mcp` and `picar-stream` show up in Teleport like the real thing, so a beam can use them any time.
 
 ```
- beam ──tsh──▶ Teleport proxy ◀──outbound only── Teleport agent (pod) ──▶ picar-sim (pod, :8765)
+ beam ──tsh──▶ Teleport proxy ◀──outbound only── Teleport agent (pod) ──▶ picar-sim (pod, :8765 MCP, :8766 stream)
 ```
 
 Nothing listens on the internet: the agent connects out, and the robot is a ClusterIP Service.
@@ -33,6 +33,8 @@ It reads the proxy from your `tsh` login and picks the newest stable agent chart
 | Another machine (a homelab k3s, say), no registry | `LOAD_CMD='ssh <node> sudo k3s ctr images import -' ./deploy.sh` (plain containerd: `sudo ctr -n k8s.io images import -`) |
 | Any cluster with a registry | `IMAGE=<registry>/picar-sim:1 PUSH=1 ./deploy.sh` |
 
+`deploy.sh` deploys the image under a tag derived from the robot's sources (`…:build-<hash>`), so re-running it after a code change always rolls new pods, even if you reuse the tag you typed. (Re-pushing an old tag is ignored by nodes that already have it.)
+
 Building on an Apple-silicon Mac for an amd64 cluster (or the reverse)? Add `PLATFORM=linux/amd64`.
 
 ## How the agent joins
@@ -51,8 +53,9 @@ That is easy on EKS/GKE and a project of its own on a homelab, so the example us
 
 Teleport marks MCP apps itself, and the built-in `mcp-user` role matches all of them, so a beam created with
 `--roles beam-user,mcp-user` sees `picar-mcp` straight away (`beam-user` is what gives it model access). To limit tools, use `../teleport/roles.yaml`
-(`picar-viewer` sees `snapshot, get_telemetry, stop`; `picar-driver` everything): both match the `project: picar-beambot`
-label this example sets.
+(`picar-viewer` sees `snapshot, get_telemetry, stop`; `picar-driver` everything): both match `picar-mcp` through the
+`project: picar-beambot` label this example sets, plus Teleport's own MCP marker. For the video panel add the
+`picar-stream` role. The stream app is a second port with no `/mcp`, so opening it can watch and stop the car but never drive it.
 
 ## Prove it end to end
 

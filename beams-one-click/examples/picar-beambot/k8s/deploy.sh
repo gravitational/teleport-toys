@@ -43,6 +43,15 @@ log "Teleport proxy $PROXY"
 # ── image ───────────────────────────────────────────────────────────────────
 log "Building $IMAGE"
 docker build -q ${PLATFORM:+--platform "$PLATFORM"} -f Dockerfile -t "$IMAGE" ../robot >/dev/null
+# Deploy a tag derived from the sources, not the one you typed. Re-pushing an existing tag is ignored by nodes that
+# already have it (imagePullPolicy IfNotPresent), and an unchanged Deployment spec never rolls: you would keep running
+# the old robot. A new tag whenever the code changes makes the cluster pick it up.
+SRC_HASH="$( (cat Dockerfile ../robot/*.py ../robot/requirements.txt; echo "${PLATFORM:-}") | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-10)"
+BUILT="$IMAGE"
+if [[ "$BUILT" == *:* && "${BUILT##*:}" != */* ]]; then REPO="${BUILT%:*}"; else REPO="$BUILT"; fi
+IMAGE="$REPO:build-$SRC_HASH"
+docker tag "$BUILT" "$IMAGE"
+log "Deploying as $IMAGE"
 if [[ "${PUSH:-0}" == "1" ]]; then
   docker push "$IMAGE"
 elif [[ -n "${LOAD_CMD:-}" ]]; then

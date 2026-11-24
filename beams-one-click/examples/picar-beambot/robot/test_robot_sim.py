@@ -17,17 +17,18 @@ from mcp.client.streamable_http import streamablehttp_client
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = 18765
+STREAM = 18766
 EXPECTED = {"drive", "look", "stop", "say", "get_telemetry", "snapshot"}
 
 
 @pytest.fixture(scope="module")
 def server():
-    env = {**os.environ, "SIMULATE": "1", "ROBOT_PORT": str(PORT), "SAY_CMD": "true"}
+    env = {**os.environ, "SIMULATE": "1", "ROBOT_PORT": str(PORT), "STREAM_PORT": str(STREAM), "SAY_CMD": "true"}
     p = subprocess.Popen([sys.executable, os.path.join(HERE, "robot_mcp.py")], env=env,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(50):
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{PORT}/telemetry", timeout=1)
+            urllib.request.urlopen(f"http://127.0.0.1:{STREAM}/telemetry", timeout=1)
             break
         except Exception:
             time.sleep(0.2)
@@ -60,7 +61,7 @@ def test_tools_and_calls(server):
 
 
 def test_http_faces(server):
-    t = json.load(urllib.request.urlopen(f"http://127.0.0.1:{PORT}/telemetry"))
+    t = json.load(urllib.request.urlopen(f"http://127.0.0.1:{STREAM}/telemetry"))
     assert t["simulated"] is True
-    frame = urllib.request.urlopen(f"http://127.0.0.1:{PORT}/snapshot.jpg").read()
+    frame = urllib.request.urlopen(f"http://127.0.0.1:{STREAM}/snapshot.jpg").read()
     assert frame[:2] == b"\xff\xd8"
