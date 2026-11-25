@@ -1,43 +1,26 @@
 # Teleport roles for the PiCar-X BeamBot.   tctl create -f teleport/roles.yaml
 #
-# picar-viewer / picar-driver grant the MCP app picar-mcp (robot/teleport.yaml) and choose its tools.
-# picar-stream grants the plain HTTP app picar-stream: live video, telemetry and a stop button, served on a
-#   second port with no /mcp. Hand it out next to either tier when the dashboard should show video.
+# This release has ONE role that moves the car:
+# picar-driver grants the MCP app picar-mcp (robot/teleport.yaml) and chooses its tools: everything except `resume`.
+#   To hand an agent fewer tools, copy it under a new name and trim `mcp.tools`; Teleport hides what isn't listed.
+# picar-stream grants the plain HTTP app picar-stream: live video, telemetry, stop and the dashboard's Resume button,
+#   served on a second port with no /mcp. Give it to the dashboard's beam only.
 # beambot-data matches the optional databases (beambot-postgres, beambot-redis) by the same label.
 #
 # Why two kinds of grant: `mcp.tools` only filters MCP apps. A role that matched the stream app and the robot's
-# MCP endpoint through one label would let a viewer POST `tools/call drive` through the HTTP app and bypass the
-# tool list. So the MCP grants carry `teleport.internal/app-sub-kind: mcp` (they can only ever match MCP apps),
+# MCP endpoint through one label would put `/resume` (which the tool list withholds) in reach of any agent holding
+# the role. So the MCP grant carries `teleport.internal/app-sub-kind: mcp` (it can only ever match MCP apps),
 # and the HTTP app is on a port that serves nothing but read-only streams, `/stop`, `/release` and `/resume`.
 #
 # Emergency stop is a latch on the robot: the `stop` tool (and /stop) stops the car and refuses `drive` until someone
-# resumes. Resuming is deliberately not in the viewer or driver tool lists, so an agent cannot clear the latch itself.
+# resumes. Resuming is deliberately not in the picar-driver tool list, so an agent cannot clear the latch itself.
 # It is part of picar-stream (POST /resume) and of the built-in mcp-user role (every tool). Give picar-stream to the
 # dashboard's beam, not to a beam that runs Claude Code.
 # Put the role on the *beam* with `--roles`; never let a beam inherit your admin roles.
 # `mcp.tools` is what Teleport shows the agent in tools/list; anything not listed is invisible to it.
 #
-# NOTE: no `deny` rules on purpose. Teleport deny rules apply to the whole identity, so a deny in the
-# viewer role would also block a driver grant that arrives through an access request.
-kind: role
-version: v8
-metadata:
-  name: picar-viewer
-  description: See what the PiCar-X sees. Can always hit stop. Cannot drive, aim or speak.
-spec:
-  allow:
-    app_labels:
-      project: picar-beambot
-      teleport.internal/app-sub-kind: mcp
-    mcp:
-      tools: [snapshot, get_telemetry, stop]
-    request:
-      roles: [picar-driver]
-      reason:
-        mode: required
-  options:
-    max_session_ttl: 8h
----
+# NOTE: no `deny` rules on purpose. Teleport deny rules apply to the whole identity, so a deny in one role would
+# also block a grant that arrives from another role.
 kind: role
 version: v8
 metadata:

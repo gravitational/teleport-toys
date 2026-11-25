@@ -71,7 +71,8 @@ claude = anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "i
                                   http_client=anthropic.DefaultAsyncHttpxClient(follow_redirects=False, timeout=120))
 
 NO_MODEL_ACCESS = ("The inference endpoint sent us to a Teleport login, which means this beam's identity can't use the "
-                   "model apps. Create the beam with the beam-user role (e.g. BEAM_ROLES=beam-user,mcp-user) and "
+                   "model apps. Create the beam with the beam-user role (e.g. BEAM_ROLES=beam-user,picar-driver,picar-stream; "
+                   "the built-in mcp-user also works but lets the beam resume an emergency stop) and "
                    "check that `tsh apps ls` inside it lists the openai / anthropic apps.")
 openai_http = httpx.AsyncClient(base_url=OPENAI_BASE_URL, timeout=120, headers={
     "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', 'injected-by-teleport-beam')}"})
@@ -646,7 +647,7 @@ async def robot_latched_now():
     if halt["on"]:
         return True
     try:
-        async with httpx.AsyncClient(timeout=2) as http:
+        async with httpx.AsyncClient(timeout=0.5) as http:   # short: a hung video app must not slow every chat
             r = await http.get(f"{ROBOT_STREAM_URL}/telemetry")
         return bool(r.json().get("halted"))
     except Exception:  # noqa: BLE001  can't ask: use the last poll
@@ -919,24 +920,42 @@ async def reset(req: Request):
     return {"ok": True}
 
 
+_bg = set()   # keeps the slower of the two stops running after the faster one answered
+
+
 async def robot_estop():
-    """Latch the emergency stop ON THE ROBOT: the stream app's /stop, or the MCP `stop` tool if there is no stream
-    app or it fails. Both stop the motors and make the robot refuse `drive` until it is resumed, so a drive that is
-    already on the wire (a pad press whose MCP session is still opening, an agent call mid-flight) or one from
-    another client is refused when it arrives. Returns (ok, via, text-or-errors)."""
-    errors = []
-    try:
-        async with httpx.AsyncClient(timeout=3) as http:
+    """Latch the emergency stop ON THE ROBOT through BOTH routes at once: the stream app's /stop and the MCP `stop`
+    tool. The first one that works answers; the other keeps going (both are idempotent). Trying them one after the
+    other made STOP wait out a hung video app before it even tried the MCP route. Both stop the motors and make the
+    robot refuse `drive` until it is resumed, so a drive that is already on the wire (a pad press whose MCP session is
+    still opening, an agent call mid-flight) or one from another client is refused when it arrives.
+    Returns (ok, via, text-or-errors)."""
+    async def via_stream():
+        async with httpx.AsyncClient(timeout=2) as http:
             r = await http.post(f"{ROBOT_STREAM_URL}/stop")
         r.raise_for_status()
-        return True, "stream", r.json().get("result", "stopped")
-    except Exception as e:  # noqa: BLE001
-        errors.append(f"stream app: {why(e)}")
-    resp = await robot_call("stop", {})
-    body = json.loads(resp.body)
-    if body.get("ok"):
-        return True, "mcp", body.get("result", "stopped")
-    errors.append(f"MCP stop: {body.get('error') or body.get('result')}")
+        return "stream", r.json().get("result", "stopped")
+
+    async def via_mcp():
+        body = json.loads((await robot_call("stop", {})).body)
+        if not body.get("ok"):
+            raise RuntimeError(body.get("error") or body.get("result"))
+        return "mcp", body.get("result", "stopped")
+
+    names = {asyncio.create_task(via_stream()): "stream app", asyncio.create_task(via_mcp()): "MCP stop"}
+    pending, errors = set(names), []
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            try:
+                via, text = t.result()
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{names[t]}: {why(e)}")
+                continue
+            for rest in pending:   # let the other stop finish on its own, and never leave its error unretrieved
+                _bg.add(rest)
+                rest.add_done_callback(lambda f: (_bg.discard(f), f.cancelled() or f.exception()))
+            return True, via, text
     return False, None, "; ".join(errors)
 
 

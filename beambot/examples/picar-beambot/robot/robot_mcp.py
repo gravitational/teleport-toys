@@ -19,7 +19,7 @@ Nothing listens on a public interface.
 
 The emergency stop is a latch that lives HERE, on the robot, not in whichever client pressed STOP: a drive request
 that was already on the wire, or one from a different client (Claude Code in another beam), is refused too. Only
-/resume or the `resume` tool clears it, and the default viewer/driver roles do not grant that tool.
+/resume or the `resume` tool clears it, and the default `picar-driver` role does not grant that tool.
 
 Safety on the robot, whoever calls: speed and duration are clamped, forward motion needs a fresh valid
 ultrasonic reading, every drive stops at its own deadline, the control loop survives hardware errors
@@ -148,6 +148,8 @@ class Robot:
         self.distance_ok_at = 0.0   # when the ultrasonic last gave a valid (> 0) reading
         self.need_stop = False      # a stop was requested but the hardware call failed: retry every pass
         self.halted = self._load_halt()   # emergency-stop latch: drive is refused until resume()
+        self.halt_gen = 0                 # bumped by every stop and resume, so a late file write can tell it is stale
+        self.halt_io = threading.Lock()   # serializes the latch FILE only: never held with the robot lock
 
         if SIMULATE:
             self.car = SimCar()
@@ -373,9 +375,12 @@ class Robot:
         if not HALT_FILE:
             return False
         try:
-            return os.path.exists(HALT_FILE)
-        except OSError:
+            os.stat(HALT_FILE)
             return True
+        except (FileNotFoundError, NotADirectoryError):
+            return False        # nothing saved
+        except OSError:
+            return True         # unreadable folder, I/O error: we can't tell, so stay latched
 
     @staticmethod
     def _save_halt(on):
@@ -401,16 +406,26 @@ class Robot:
         return ""
 
     def emergency_stop(self):
-        """Stop the motors and latch. The latch is set (and saved) first, so it holds even if the hardware stop
-        fails (the control loop keeps retrying the stop) and across a restart."""
+        """Stop the motors and latch, in that order of urgency: the latch flag and the hardware stop come first, under
+        the robot lock, and nothing slow runs there. The latch is then saved to disk OUTSIDE the lock (a stalled SD
+        card must never delay a stop). The latch holds even if the hardware stop fails (the control loop keeps
+        retrying it) and across a restart once the file is written."""
         with self.lock:
             self.halted = True
-            not_saved = self._save_halt(True)
+            self.halt_gen += 1
+            gen = self.halt_gen
+            stop_error = None
             try:
                 self._stop("emergency stop")
             except Exception as e:  # noqa: BLE001
+                stop_error = e
                 self.last_event = f"emergency stop: hardware stop FAILED ({e}); latched, retrying"
-                raise StopFailed(self.last_event) from e
+        not_saved = ""
+        with self.halt_io:
+            if self.halted and self.halt_gen == gen:   # skip if a Resume (or a newer stop) got in first
+                not_saved = self._save_halt(True)
+        if stop_error is not None:
+            raise StopFailed(self.last_event) from stop_error
         return "stopped" + (f" (WARNING: the latch could not be saved, a restart would clear it: {not_saved})"
                             if not_saved else "")
 
@@ -421,12 +436,18 @@ class Robot:
         return "stopped"
 
     def resume(self):
-        with self.lock:
+        with self.halt_io:
+            with self.lock:
+                gen = self.halt_gen
             failed = self._save_halt(False)
             if failed:   # the saved latch is still there: stay latched, or a restart would bring it back
                 raise RuntimeError(f"still latched: could not clear the saved latch ({failed})")
-            self.halted = False
-            self.last_event = "resumed after emergency stop"
+            with self.lock:
+                if self.halt_gen != gen:   # STOP was pressed again while we were clearing the file
+                    raise RuntimeError("still latched: STOP was pressed again, resume once more")
+                self.halted = False
+                self.halt_gen += 1
+                self.last_event = "resumed after emergency stop"
         return "resumed"
 
     def say(self, text):
@@ -509,7 +530,7 @@ def stop() -> str:
 
 @mcp.tool()
 def resume() -> str:
-    """Clear the emergency-stop latch so `drive` works again. Not part of the default viewer or driver roles."""
+    """Clear the emergency-stop latch so `drive` works again. Not part of the default `picar-driver` role."""
     return robot.resume()
 
 
@@ -568,7 +589,10 @@ async def stop_route(request: Request):
 
 
 async def release_route(request: Request):
-    return JSONResponse({"result": robot.release()})
+    try:
+        return JSONResponse({"result": robot.release()})
+    except Exception as e:  # noqa: BLE001  say so: the car may still be moving
+        return JSONResponse({"ok": False, "error": f"hardware stop failed: {e}"}, status_code=500)
 
 
 async def resume_route(request: Request):

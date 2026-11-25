@@ -89,15 +89,15 @@ def test_setup_warns_about_old_tsh(teleport, tmp_path):
 
 # --------------------------------------------------------------------------- laptop side
 def up(tp, tmp_path, *args, **env):
-    roles = [] if ("--roles" in args or "--inherit-roles" in args or "--beam" in args) else ["--roles", "picar-viewer"]
+    roles = [] if ("--roles" in args or "--inherit-roles" in args or "--beam" in args) else ["--roles", "picar-driver"]
     return run(UP, tp, "--dir", "/home/beams/work", *roles, *args, **{"POLL_SECONDS": "0", **env})
 
 
 def test_up_creates_a_beam_with_the_requested_roles_and_configures_it(teleport, tmp_path):
-    r = up(teleport, tmp_path, "--roles", "picar-viewer", "--labels", "robot=beambot-sim", "--allow", "sense_*")
+    r = up(teleport, tmp_path, "--roles", "picar-driver", "--labels", "robot=beambot-sim", "--allow", "sense_*")
     assert r.returncode == 0, r.stdout + r.stderr
     add = teleport.calls("tsh", "beams", "add")
-    assert len(add) == 1 and "--roles=picar-viewer" in add[0]["args"]
+    assert len(add) == 1 and "--roles=picar-driver" in add[0]["args"]
     assert len(teleport.calls("tsh", "beams", "scp")) == 1
     execs = teleport.calls("tsh", "beams", "exec")
     last = execs[-1]["args"]
@@ -124,10 +124,10 @@ def test_up_treats_a_blank_role_list_as_not_given(teleport, tmp_path, blank):
 
 
 def test_up_rejects_empty_role_entries_and_strips_spaces(teleport, tmp_path):
-    assert up(teleport, tmp_path, "--roles", "beam-user,,picar-viewer", "--labels", "x=y").returncode == 2
+    assert up(teleport, tmp_path, "--roles", "beam-user,,picar-driver", "--labels", "x=y").returncode == 2
     assert teleport.calls("tsh", "beams", "add") == []
-    assert up(teleport, tmp_path, "--roles", " beam-user, picar-viewer ", "--labels", "robot=beambot-sim").returncode == 0
-    assert "--roles=beam-user,picar-viewer" in teleport.calls("tsh", "beams", "add")[0]["args"]
+    assert up(teleport, tmp_path, "--roles", " beam-user, picar-driver ", "--labels", "robot=beambot-sim").returncode == 0
+    assert "--roles=beam-user,picar-driver" in teleport.calls("tsh", "beams", "add")[0]["args"]
 
 
 def test_up_can_inherit_when_explicitly_asked(teleport, tmp_path):

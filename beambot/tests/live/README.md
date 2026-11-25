@@ -26,10 +26,17 @@ Tests skip, rather than fail, for resources your roles can't see: that is RBAC w
 
 ## Is the tool filter really on the only way in?
 
-`check_mcp_bypass.sh` runs inside a **least-privilege beam** (`tsh beams add --roles beam-user,picar-viewer`) and
-tries to reach the robot's MCP app as plain HTTP through `tsh proxy app`, listing and calling `drive` without
+`check_mcp_bypass.sh` runs inside a **least-privilege beam** (`tsh beams add --roles beam-user,picar-driver`) and
+tries to reach the robot's MCP app as plain HTTP through `tsh proxy app`, listing and calling `resume` (the tool that lifts an emergency stop, which `picar-driver` withholds) without
 the MCP tool filter. It also confirms the video/telemetry app does not serve `/mcp`. `RESULT: PASS` means the
-viewer could not see or call `drive` that way. Run it again after changing roles.
+beam could not see or call `resume` that way. Set `FORBIDDEN=drive` to check a trimmed copy of the role. Run it again after changing roles.
+
+It never passes on silence. **PASS** (exit 0) needs Teleport's own denial of the `resume` call, with `resume` missing from
+the tool list and the role's own tools still there. **FAIL** (exit 1) means `resume` was listed or the call reached the
+robot, even if the robot then refused it (for example because its latch was set). Everything else, such as no proxy, no
+answer, a list that doesn't look like this robot's, or an error that isn't Teleport's, is **INCONCLUSIVE** (exit 2). The stream
+app check is **SKIPPED** from a beam without it, because the driver role can't see `picar-stream`; `REQUIRE_STREAM=1` turns a skip
+into INCONCLUSIVE, and the line `checks: N passed, N failed, ...` says what ran.
 
 ```bash
 bash tests/live/check_mcp_bypass.sh            # [mcp-app] [stream-app], defaults picar-mcp picar-stream

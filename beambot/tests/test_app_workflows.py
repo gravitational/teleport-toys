@@ -52,7 +52,7 @@ def test_page_and_tasks(app):
 
 def test_beam_card_shows_identity_tools_and_storage(app, llm):
     card = app.get("/api/beam").json()
-    assert card["identity"]["user"] == "alice" and card["identity"]["roles"] == ["picar-viewer"]
+    assert card["identity"]["user"] == "alice" and card["identity"]["roles"] == ["picar-driver"]
     assert set(card["mcp"]["allowed"]) == ROBOT_TOOLS and card["mcp"]["error"] is None
     assert "via_bot" not in card["mcp"], "tunnels use the beam's own identity: there is no bot"
     assert card["inference"]["endpoint_host"].endswith(llm.base.rsplit(":", 1)[1])
@@ -122,7 +122,7 @@ def test_model_is_configurable(start_app, llm):
 
 
 def test_tools_teleport_hides_are_not_offered_and_calls_fail_cleanly(start_app, llm, tmp_path):
-    """RBAC at work: a viewer-only identity sees three tools. Asking for `drive` anyway must not crash the app."""
+    """RBAC at work: an identity with a trimmed tool list sees three tools. Asking for `drive` anyway must not crash the app."""
     import subprocess
     import sys
 

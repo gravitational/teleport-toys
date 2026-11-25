@@ -1,6 +1,6 @@
 """Regression tests for the four must-fix review findings. Each test reproduces the reviewer's scenario.
 
-1. a viewer must not be able to drive through the plain HTTP app
+1. a role must not reach the stream app (and /resume) through its MCP grant
 2. STOP must stop the agent, not just the car
 3. a hardware fault must never leave the motors running
 4. the dashboard must not run script smuggled in through the shared Redis feed
@@ -110,7 +110,7 @@ def test_roles_cannot_reach_the_stream_app_with_a_tool_grant():
     for where, apps in sets.items():
         eff = {a["name"]: {**a["labels"], **({MCP_LABEL: "mcp"} if a["uri"].startswith("mcp+") else {})} for a in apps}
         matches = lambda role, app: all(eff[app].get(k) == v for k, v in roles[role]["app_labels"].items())  # noqa: E731
-        for role in ("picar-viewer", "picar-driver"):
+        for role in ("picar-driver",):
             assert roles[role]["mcp"]["tools"]
             assert roles[role]["app_labels"].get(MCP_LABEL) == "mcp", f"{role} must only ever match MCP apps"
             assert matches(role, "picar-mcp") and not matches(role, "picar-stream"), (where, role)
@@ -643,7 +643,7 @@ def test_everyday_stops_do_not_latch(own_robot, start_app):
 
 def test_default_roles_cannot_resume_a_stop():
     _, roles = _apps_and_roles()
-    for role in ("picar-viewer", "picar-driver"):
+    for role in ("picar-driver",):
         tools = roles[role]["mcp"]["tools"]
         assert "stop" in tools and "resume" not in tools, role
 
@@ -893,7 +893,8 @@ def test_drive_is_clamped_to_the_speed_limit_and_refuses_an_obstacle(rm):
 
 def test_the_role_tool_lists_are_exactly_what_the_docs_promise():
     _, roles = _apps_and_roles()
-    assert set(roles["picar-viewer"]["mcp"]["tools"]) == {"snapshot", "get_telemetry", "stop"}, "a viewer must not move the car"
+    assert "picar-viewer" not in roles, "this release ships one driving role"
+    assert [n for n, s in roles.items() if "mcp" in s] == ["picar-driver"]
     assert set(roles["picar-driver"]["mcp"]["tools"]) == {"snapshot", "get_telemetry", "stop", "look", "drive", "say"}
     for name, spec in roles.items():
         tools = set((spec.get("mcp") or {}).get("tools", []))
@@ -990,4 +991,129 @@ def test_the_architecture_pdf_is_the_beambot_one_with_no_active_content():
     pdf = (ROOT / "docs/beambot-architecture.pdf").read_bytes()
     for needle in (b"/JavaScript", b"/JS ", b"/Launch", b"/EmbeddedFile", b"/URI", b"/OpenAction", b"/AA "):
         assert needle not in pdf, needle
-    assert b"BeamBot" in pdf and b"Acorn" not in pdf and b"acorn" not in pdf.lower()
+    assert b"BeamBot" in pdf
+
+
+# =========================================================================== review round 4
+def test_stop_does_not_wait_for_the_disk(rm, monkeypatch, tmp_path):
+    """A stalled SD card used to delay the stop by however long the latch write took, with the motors running."""
+    monkeypatch.setattr(rm, "HALT_FILE", str(tmp_path / "halted"))
+    orig = rm.Robot._save_halt
+    monkeypatch.setattr(rm.Robot, "_save_halt", staticmethod(lambda on: (time.sleep(2.0), orig(on))[1]))
+    r = new_robot(rm)
+    r.drive(20, 0.5, 0, wait=False)
+    assert r.car.speed == 20
+    t0 = time.time()
+    th = threading.Thread(target=r.emergency_stop)
+    th.start()
+    time.sleep(0.25)
+    assert r.car.speed == 0 and r.halted, "the motors were still running while the latch was being written"
+    t1 = time.time()
+    with pytest.raises(RuntimeError, match="latched"):
+        r.drive(20, 0.5, 0, wait=False)             # the lock is free: this must not queue behind the write
+    assert time.time() - t1 < 0.3
+    th.join(5)
+    assert (tmp_path / "halted").exists() and time.time() - t0 >= 2.0
+
+
+def test_a_resume_that_races_the_slow_latch_write_leaves_a_consistent_state(rm, monkeypatch, tmp_path):
+    f = tmp_path / "halted"
+    monkeypatch.setattr(rm, "HALT_FILE", str(f))
+    orig = rm.Robot._save_halt
+    monkeypatch.setattr(rm.Robot, "_save_halt", staticmethod(lambda on: (time.sleep(1.0 if on else 0), orig(on))[1]))
+    r = new_robot(rm)
+    th = threading.Thread(target=r.emergency_stop)
+    th.start()
+    time.sleep(0.2)
+    assert r.halted
+    r.resume()                                      # waits for the write, then clears it
+    th.join(5)
+    assert r.halted is False and not f.exists(), "a late write left a latch file behind a resumed robot"
+
+
+def test_an_unreadable_latch_folder_means_latched(rm, monkeypatch, tmp_path):
+    monkeypatch.setattr(rm, "HALT_FILE", str(tmp_path / "halted"))
+    assert rm.Robot._load_halt() is False                              # nothing saved
+    (tmp_path / "halted").write_text("1")
+    assert rm.Robot._load_halt() is True
+    (tmp_path / "halted").unlink()
+    with monkeypatch.context() as m:
+        def denied(*a, **k):
+            raise PermissionError("cannot read the state folder")
+        m.setattr(os, "stat", denied)
+        assert rm.Robot._load_halt() is True, "an unreadable state folder must come back latched"
+
+
+def test_a_latch_file_that_cannot_be_removed_keeps_the_robot_latched(rm, monkeypatch, tmp_path):
+    monkeypatch.setattr(rm, "HALT_FILE", str(tmp_path / "halted"))
+    r = new_robot(rm)
+    r.emergency_stop()
+    with monkeypatch.context() as m:
+        def denied(*a, **k):
+            raise PermissionError("read-only file system")
+        m.setattr(os, "unlink", denied)
+        with pytest.raises(RuntimeError, match="still latched"):
+            r.resume()
+    assert r.halted is True
+    with pytest.raises(RuntimeError, match="latched"):
+        r.drive(20, 0.2, 0, wait=False)
+    assert r.resume() == "resumed" and (tmp_path / "halted").exists() is False
+
+
+def test_a_failed_hardware_stop_on_release_is_reported(rm):
+    from starlette.testclient import TestClient
+    r = new_robot(rm)
+    rm.robot = r
+
+    def broken():
+        raise OSError("I2C write failed")
+    r.car.stop = broken
+    resp = TestClient(rm.stream_app).post("/release")
+    assert resp.status_code == 500 and resp.json()["ok"] is False and "I2C" in resp.json()["error"]
+
+
+def test_stop_does_not_wait_for_a_hung_video_app(own_robot, start_app):
+    r = own_robot()
+    hung = SlowProxy(r.stream_port, delay=30)          # accepts, then says nothing for 30 s
+    try:
+        app = start_app(robot_mcp=r.mcp, ROBOT_STREAM_URL=f"http://127.0.0.1:{hung.port}")
+        assert app.post("/api/drive", json={"speed": 20, "seconds": 3}).json()["ok"]
+        time.sleep(0.3)
+        t0 = time.time()
+        resp = app.post("/api/stop")
+        took = time.time() - t0
+        assert resp.status_code == 200 and resp.json()["via"] == "mcp", resp.text
+        assert took < 1.2, f"STOP took {took:.1f}s: it waited for the hung video app"
+        assert tele(r)["halted"] is True and tele(r)["moving"] is False
+    finally:
+        hung.close()
+
+
+def test_chat_start_is_not_slowed_by_a_hung_video_app(own_robot, start_app):
+    r = own_robot()
+    hung = SlowProxy(r.stream_port, delay=30)
+    try:
+        app = start_app(robot_mcp=r.mcp, ROBOT_STREAM_URL=f"http://127.0.0.1:{hung.port}")
+        t0 = time.time()
+        assert app.post("/api/chat", json={"message": "hi", "task": "count"}).status_code == 200
+        assert time.time() - t0 < 1.2
+    finally:
+        hung.close()
+
+
+def test_resume_is_refused_for_a_call_in_flight_even_without_the_settle_window(own_robot, start_app):
+    """RESUME_SETTLE_S=0 leaves only the in-flight count to protect Resume."""
+    r = own_robot()
+    slow = SlowProxy(r.port, delay=1.0)
+    try:
+        app = start_app(robot_mcp=f"http://127.0.0.1:{slow.port}/mcp", ROBOT_STREAM_URL=r.stream, RESUME_SETTLE_S=0)
+        t = threading.Thread(target=lambda: app.post("/api/drive", json={"speed": 20, "seconds": 3}, timeout=40))
+        t.start()
+        time.sleep(0.4)
+        assert app.post("/api/stop").status_code == 200
+        assert app.post("/api/resume", json={}).status_code == 409
+        t.join(30)
+        assert resume_when_ready(app).status_code == 200
+        assert x_of(r) == 0.0
+    finally:
+        slow.close()

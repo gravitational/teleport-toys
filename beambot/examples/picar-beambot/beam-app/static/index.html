@@ -285,11 +285,11 @@ const FEATURES = [
                   : `<span class="tool deny"><i class="ph ph-lock-simple"></i>${esc(t)}</span>`).join('')}</div>` +
                (b.mcp.error ? `<div class="bad" style="font-size:12px">MCP server unreachable (${esc(b.mcp.error)})</div>` : '') +
                `<div class="event">Robot calls use this beam's delegated identity, so the audit log shows <b>you</b> and the beam's own workload identity.</div>` +
-               `<div class="event">Try it: give the demo user this role instead of <code>picar-driver</code>, start a new beam, and the drive tools drop out of the list.</div>
+               `<div class="event">Try it: copy <code>picar-driver</code> as a role like this one, start a new beam with it, and the drive tools drop out of the list.</div>
 <pre>kind: role
 version: v8
 metadata:
-  name: picar-viewer
+  name: picar-readonly
 spec:
   allow:
     app_labels: {project: picar-beambot}

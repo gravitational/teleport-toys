@@ -14,7 +14,7 @@ import time
 
 prog, args = sys.argv[1], sys.argv[2:]
 STATE = {
-    "logged_in": True, "version": "18.11.9", "user": "alice", "roles": ["picar-viewer"],
+    "logged_in": True, "version": "18.11.9", "user": "alice", "roles": ["picar-driver"],
     "cluster": "example.beams.run", "proxy": "example.beams.run:443",
     "mcp_servers": [{"name": "beambot-sim-arm", "labels": {"robot": "beambot-sim"},
                      "tools": ["sense_arm_pose", "act_arm_home", "safety_stop"]},

@@ -54,8 +54,8 @@ That is easy on EKS/GKE and a project of its own on a homelab, so the example us
 Teleport marks MCP apps itself, and the built-in `mcp-user` role matches all of them, so a beam created with
 `--roles beam-user,mcp-user` sees `picar-mcp` straight away (`beam-user` is what gives it model access). But `mcp-user`
 grants every tool, including `resume`, so anything in that beam (Claude Code, a script) can lift an emergency stop.
-To limit tools, use `../teleport/roles.yaml` (`picar-viewer` sees `snapshot, get_telemetry, stop`; `picar-driver`
-everything except `resume`): both match `picar-mcp` through the
+To limit tools, use `../teleport/roles.yaml` (`picar-driver` is every tool except `resume`; copy it and trim its
+`mcp.tools` for fewer): it matches `picar-mcp` through the
 `project: picar-beambot` label this example sets, plus Teleport's own MCP marker. For the video panel and the dashboard's
 Resume button add the `picar-stream` role. The stream app is a second port with no `/mcp`, so opening it can watch,
 stop and resume the car but never drive it.

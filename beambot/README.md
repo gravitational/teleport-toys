@@ -41,7 +41,7 @@ example (an admin creates them once with `tctl create -f`):
 ```bash
 tctl create -f examples/picar-beambot/teleport/roles.yaml
 bash beam-mcp-setup/scripts/beam_mcp_up.sh \
-  --roles beam-user,picar-viewer --labels project=picar-beambot \
+  --roles beam-user,picar-driver --labels project=picar-beambot \
   --allow 'snapshot,get_telemetry,stop' --deny 'drive,look,say'
 ```
 
@@ -65,7 +65,7 @@ Then `tsh beams ssh <beam>` and run `claude`. To give the agent hands later, cre
 | Model calls from a beam return HTML or a `302` to `/web/launch/...` | The beam's roles don't include `beam-user`, so it can't see the model apps. | Create the beam with `--roles beam-user,<others>`; `tsh apps ls` in the beam should list `openai` and `anthropic`. |
 | `ERROR: You do not have permission to delegate the following roles: [...]` from `tsh beams add --roles` | You can only hand a beam roles your own user holds (also shown for blank entries like `" "` or `a,,b`). | Add the role to your user (`tctl users update <you> --set-roles <current roles>,<new role>`), log in again, retry. |
 | A beam holds far more roles than you asked for | `--roles=""` means "no `--roles`": the beam inherits ALL your roles. An unset shell variable does it silently. | Never pass an empty list. The scripts here refuse a blank one. |
-| `tsh mcp ls` is empty inside the beam | The beam only holds the roles you gave it. | Include one that grants the MCP app: the built-in `mcp-user` matches every MCP app. |
+| `tsh mcp ls` is empty inside the beam | The beam only holds the roles you gave it. | Include one that grants the MCP app: the built-in `mcp-user` matches every MCP app, but it grants every tool, including the robot's `resume` (it can lift an emergency stop). Prefer a role from the example's `roles.yaml`. |
 | `No module named 'mcp.server.fastmcp'` | `pip install mcp` pulled the 2.x SDK, which renamed `FastMCP`. | Install `'mcp>=1.9,<2'`. |
 | `python3 -m venv` fails, or `pip` says "externally managed" | Beam images have no python3-venv and mark system Python as managed. | `python3 -m pip install --user --break-system-packages <pkg>`. |
 | `tsh proxy ...` exits right away inside a beam | The beam's identity lacks access to that app or database. | Create the beam with roles that grant it (`--roles`), and read `/tmp/proxy-*.log`. |
@@ -92,9 +92,11 @@ the dashboard connects to the robot over MCP, runs the agent loop and writes its
 Teleport. `tsh mcp connect` and `tsh proxy mcp` work from a least-privilege beam against an MCP app served by a
 Teleport agent in Kubernetes, and the dashboard drives that robot through the tunnel. Claude Code inside the beam
 calls models once the beam has the `beam-user` role.
-A `picar-viewer` beam that opens the robot's MCP app as plain HTTP with `tsh proxy app` still gets the filtered tool
-list (`stop`, `get_telemetry`, `snapshot`), and a `drive` call is denied by Teleport RBAC
-(`tests/live/check_mcp_bypass.sh`).
+On a read-only role, a beam that opened the robot's MCP app as plain HTTP with `tsh proxy app` still got the filtered tool
+list (`stop`, `get_telemetry`, `snapshot`), and Teleport answered a `drive` call with its own RBAC error ("RBAC is
+enforced by your Teleport roles ... access to resource denied"). `tests/live/check_mcp_bypass.sh` now checks the same
+path for the shipped role: a `picar-driver` beam must not be able to list or call `resume`. It reports `INCONCLUSIVE`,
+not a pass, when it can't see Teleport's denial, and it has not been run against a cluster with that role yet.
 
 ## Tests
 

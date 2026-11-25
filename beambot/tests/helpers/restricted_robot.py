@@ -1,4 +1,4 @@
-"""A robot MCP server that only exposes what a viewer role would see (what Teleport RBAC does by hiding tools).
+"""A robot MCP server that only exposes what a trimmed-down copy of picar-driver would see (what Teleport RBAC does by hiding tools).
 
     python restricted_robot.py <port>
 """

@@ -134,11 +134,11 @@ def test_deploy_treats_a_blank_role_list_as_not_set(teleport, blank):
 
 
 def test_deploy_rejects_empty_role_entries_and_strips_spaces(teleport):
-    assert deploy(teleport, BEAM_ROLES="beam-user,,picar-viewer").returncode != 0
+    assert deploy(teleport, BEAM_ROLES="beam-user,,picar-driver").returncode != 0
     assert teleport.calls("tsh", "beams", "add") == []
-    r = deploy(teleport, BEAM_ROLES=" beam-user, picar-viewer ")
+    r = deploy(teleport, BEAM_ROLES=" beam-user, picar-driver ")
     assert r.returncode == 0, r.stderr
-    assert "--roles=beam-user,picar-viewer" in teleport.calls("tsh", "beams", "add")[0]["args"]
+    assert "--roles=beam-user,picar-driver" in teleport.calls("tsh", "beams", "add")[0]["args"]
 
 
 def test_deploy_can_inherit_when_explicitly_asked(teleport):
