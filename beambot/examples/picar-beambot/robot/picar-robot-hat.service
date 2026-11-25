@@ -16,6 +16,9 @@ SupplementaryGroups=robohw video audio
 WorkingDirectory=/opt/picar-beambot
 ExecStart=/opt/picar-beambot/venv/bin/python /opt/picar-beambot/robot_mcp.py
 Restart=on-failure
+# The emergency-stop latch is saved under $STATE_DIRECTORY (/var/lib/picar-beambot), so a restart after a crash
+# comes back still latched. A human clears it with Resume.
+StateDirectory=picar-beambot
 RestartSec=2
 # However the server ends (crash, SIGKILL, OOM), the HAT would keep its last PWM duty: zero the motors afterwards.
 ExecStopPost=-/opt/picar-beambot/venv/bin/python /opt/picar-beambot/robot_hat_lite.py stop

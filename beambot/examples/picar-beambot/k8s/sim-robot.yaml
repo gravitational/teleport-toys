@@ -24,6 +24,12 @@ spec:
           ports:
             - {name: mcp, containerPort: 8765}      # /mcp only
             - {name: stream, containerPort: 8766}   # video, telemetry, stop: no /mcp
+          env:
+            # The emergency-stop latch is saved here, so a restarted container comes back still latched.
+            # An emptyDir survives container restarts, not a replaced pod: a new pod starts unlatched.
+            - {name: HALT_FILE, value: /var/lib/picar-beambot/halted}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/picar-beambot}
           readinessProbe:
             httpGet: {path: /telemetry, port: stream}
             periodSeconds: 5
@@ -38,6 +44,8 @@ spec:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
+      volumes:
+        - {name: state, emptyDir: {}}
 ---
 apiVersion: v1
 kind: Service

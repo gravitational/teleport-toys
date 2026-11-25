@@ -1,6 +1,6 @@
 # An always-on PiCar-X in your Kubernetes cluster 🤖☸️
 
-No robot, no laptop that has to stay awake. This puts the **simulated PiCar-X** (same six MCP tools, same camera
+No robot, no laptop that has to stay awake. This puts the **simulated PiCar-X** (same seven MCP tools, same camera
 and telemetry) in a local Kubernetes cluster and a **Teleport agent** next to it that dials out to your cluster.
 Afterwards `picar-mcp` and `picar-stream` show up in Teleport like the real thing, so a beam can use them any time.
 
@@ -52,21 +52,24 @@ That is easy on EKS/GKE and a project of its own on a homelab, so the example us
 ## Who can see it
 
 Teleport marks MCP apps itself, and the built-in `mcp-user` role matches all of them, so a beam created with
-`--roles beam-user,mcp-user` sees `picar-mcp` straight away (`beam-user` is what gives it model access). To limit tools, use `../teleport/roles.yaml`
-(`picar-viewer` sees `snapshot, get_telemetry, stop`; `picar-driver` everything): both match `picar-mcp` through the
-`project: picar-beambot` label this example sets, plus Teleport's own MCP marker. For the video panel add the
-`picar-stream` role. The stream app is a second port with no `/mcp`, so opening it can watch and stop the car but never drive it.
+`--roles beam-user,mcp-user` sees `picar-mcp` straight away (`beam-user` is what gives it model access). But `mcp-user`
+grants every tool, including `resume`, so anything in that beam (Claude Code, a script) can lift an emergency stop.
+To limit tools, use `../teleport/roles.yaml` (`picar-viewer` sees `snapshot, get_telemetry, stop`; `picar-driver`
+everything except `resume`): both match `picar-mcp` through the
+`project: picar-beambot` label this example sets, plus Teleport's own MCP marker. For the video panel and the dashboard's
+Resume button add the `picar-stream` role. The stream app is a second port with no `/mcp`, so opening it can watch,
+stop and resume the car but never drive it.
 
 ## Prove it end to end
 
 ```bash
-tsh beams add --roles beam-user,mcp-user
+tsh beams add --roles beam-user,picar-driver   # roles from ../teleport/roles.yaml; mcp-user also lets the beam resume a stop
 tsh beams ssh <beam>
 # inside, with this repo copied in:
 bash beam-mcp-setup/scripts/verify_in_beam.sh --app picar-mcp
 ```
 
-Or deploy the dashboard against it: `cd ../beam-app && BEAM_ROLES=beam-user,mcp-user USE_DBS=0 ./deploy-beam.sh`.
+Or deploy the dashboard against it: `cd ../beam-app && BEAM_ROLES=beam-user,picar-driver,picar-stream USE_DBS=0 ./deploy-beam.sh`.
 
 ## Troubleshooting
 

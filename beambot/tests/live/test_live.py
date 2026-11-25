@@ -104,7 +104,9 @@ def test_mcp_tools_over_a_local_tunnel(tunnel):
                 if os.environ.get("LIVE_DRIVE") == "1" and "drive" in names:
                     res = await s.call_tool("drive", {"speed": 15, "seconds": 0.5})
                     assert not res.isError
-                    await s.call_tool("stop", {})
+                    # A speed-0 drive ends the move without latching. Do NOT call `stop` here: it latches the
+                    # real robot's emergency stop, and a driver beam cannot resume it.
+                    await s.call_tool("drive", {"speed": 0, "seconds": 0.1})
     anyio.run(go)
 
 

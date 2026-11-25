@@ -81,7 +81,9 @@ def test_agent_counts_objects_and_persists_them(app, llm):
     assert len(reqs) == 4
     first = reqs[0]["body"]
     assert first["model"] == "gpt-6.1-sol"                                       # the documented default
-    assert ROBOT_TOOLS <= tool_names(first) and "record_count" in tool_names(first)
+    # the agent gets every robot tool except `resume`: only a person lifts an emergency stop
+    assert (ROBOT_TOOLS - {"resume"}) <= tool_names(first) and "resume" not in tool_names(first)
+    assert "record_count" in tool_names(first)
     assert "BeamBot" in first["instructions"]
     # the camera frame travelled robot -> MCP -> app -> model as an image
     second_input = reqs[1]["body"]["input"]
@@ -201,7 +203,7 @@ def test_emergency_stop_halts_the_robot(app, robot):
         time.sleep(0.2)
         assert telemetry(robot)["moving"] is False and telemetry(robot)["halted"] is True
     finally:
-        assert app.post("/api/resume").status_code == 200        # the robot is shared by the whole session
+        assert app.post("/api/resume", json={}).status_code == 200        # the robot is shared by the whole session
     assert telemetry(robot)["halted"] is False
 
 

@@ -59,6 +59,24 @@ MAX_SPEED = int(os.environ.get("MAX_SPEED", "40"))          # picarx speed units
 MAX_DRIVE_SECONDS = float(os.environ.get("MAX_DRIVE_SECONDS", "3"))
 OBSTACLE_STOP_CM = float(os.environ.get("OBSTACLE_STOP_CM", "20"))
 MAX_STEER_DEG = 30
+# The emergency-stop latch is saved to this file so a restart (systemd Restart=on-failure after a crash, a pod
+# restart) comes back STILL latched. HALT_FILE="" turns it off. Default on hardware: $STATE_DIRECTORY/halted
+# (systemd StateDirectory=picar-beambot). The simulator keeps it in memory unless HALT_FILE is set.
+def _halt_file():
+    path = os.environ.get("HALT_FILE")
+    if path is not None:
+        return path or None
+    if SIMULATE:
+        return None
+    base = os.environ.get("STATE_DIRECTORY", "").split(":")[0] or os.path.expanduser("~/.local/state/picar-beambot")
+    return os.path.join(base, "halted")
+
+
+HALT_FILE = _halt_file()
+
+
+class StopFailed(RuntimeError):
+    """The latch is set but the hardware stop call failed (it keeps being retried)."""
 # Forward motion needs a valid ultrasonic echo no older than this. A -1 / None reading (no echo, or a dead
 # sensor) is "unknown", not "clear". Set ALLOW_BLIND_FORWARD=1 only if you accept driving without the sensor.
 SENSOR_MAX_AGE_S = float(os.environ.get("SENSOR_MAX_AGE_S", "0.5"))
@@ -129,7 +147,7 @@ class Robot:
         self.last_event = "ready"
         self.distance_ok_at = 0.0   # when the ultrasonic last gave a valid (> 0) reading
         self.need_stop = False      # a stop was requested but the hardware call failed: retry every pass
-        self.halted = False         # emergency-stop latch: drive is refused until resume()
+        self.halted = self._load_halt()   # emergency-stop latch: drive is refused until resume()
 
         if SIMULATE:
             self.car = SimCar()
@@ -295,8 +313,8 @@ class Robot:
         seconds = max(0.1, min(MAX_DRIVE_SECONDS, float(seconds)))
         steer = max(-MAX_STEER_DEG, min(MAX_STEER_DEG, int(steer)))
         with self.lock:
-            if self.halted:
-                return "refused: emergency stop is latched; resume it (dashboard Resume) before driving"
+            if self.halted:   # an error, not a string: callers must not see a refused drive as a success
+                raise RuntimeError("refused: emergency stop is latched; resume it (dashboard Resume) before driving")
             if speed > 0:
                 why = self._forward_blocked(time.time())
                 if why:
@@ -349,13 +367,52 @@ class Robot:
         time.sleep(0.4)
         return f"camera pan={pan} tilt={tilt}"
 
+    @staticmethod
+    def _load_halt():
+        """A latch saved by an earlier run stays set. If the file can't even be checked, assume latched."""
+        if not HALT_FILE:
+            return False
+        try:
+            return os.path.exists(HALT_FILE)
+        except OSError:
+            return True
+
+    @staticmethod
+    def _save_halt(on):
+        """Write or remove the saved latch. Returns an error text, or "" on success."""
+        if not HALT_FILE:
+            return ""
+        try:
+            if on:
+                os.makedirs(os.path.dirname(HALT_FILE) or ".", exist_ok=True)
+                fd = os.open(HALT_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                try:
+                    os.write(fd, f"{time.time():.0f}\n".encode())
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            else:
+                try:
+                    os.unlink(HALT_FILE)
+                except (FileNotFoundError, NotADirectoryError):   # nothing saved, so nothing to clear
+                    pass
+        except OSError as e:
+            return str(e)
+        return ""
+
     def emergency_stop(self):
-        """Stop the motors and latch. The latch is set first, so it holds even if the hardware stop fails
-        (the control loop keeps retrying the stop)."""
+        """Stop the motors and latch. The latch is set (and saved) first, so it holds even if the hardware stop
+        fails (the control loop keeps retrying the stop) and across a restart."""
         with self.lock:
             self.halted = True
-            self._stop("emergency stop")
-        return "stopped"
+            not_saved = self._save_halt(True)
+            try:
+                self._stop("emergency stop")
+            except Exception as e:  # noqa: BLE001
+                self.last_event = f"emergency stop: hardware stop FAILED ({e}); latched, retrying"
+                raise StopFailed(self.last_event) from e
+        return "stopped" + (f" (WARNING: the latch could not be saved, a restart would clear it: {not_saved})"
+                            if not_saved else "")
 
     def release(self):
         """A plain stop that does not latch: letting go of the drive pad, the end of an auto-map run."""
@@ -365,6 +422,9 @@ class Robot:
 
     def resume(self):
         with self.lock:
+            failed = self._save_halt(False)
+            if failed:   # the saved latch is still there: stay latched, or a restart would bring it back
+                raise RuntimeError(f"still latched: could not clear the saved latch ({failed})")
             self.halted = False
             self.last_event = "resumed after emergency stop"
         return "resumed"
@@ -501,7 +561,10 @@ async def video_route(request: Request):
 
 
 async def stop_route(request: Request):
-    return JSONResponse({"result": robot.emergency_stop(), "halted": True})
+    try:
+        return JSONResponse({"result": robot.emergency_stop(), "halted": True})
+    except StopFailed as e:   # still latched, but say so: the car may be moving
+        return JSONResponse({"ok": False, "halted": True, "error": str(e)}, status_code=500)
 
 
 async def release_route(request: Request):
@@ -509,7 +572,16 @@ async def release_route(request: Request):
 
 
 async def resume_route(request: Request):
-    return JSONResponse({"result": robot.resume(), "halted": False})
+    # Only the dashboard's server calls this: a JSON POST with no Origin header. A web page in someone's browser
+    # (a form, a text/plain fetch) is refused, so it can't lift a stop with the visitor's Teleport session.
+    if (request.headers.get("origin") or request.headers.get("sec-fetch-site", "none") not in ("none", "same-origin")
+            or "application/json" not in request.headers.get("content-type", "")):
+        return JSONResponse({"error": "resume must be a JSON POST from the dashboard, not a browser page"},
+                            status_code=403)
+    try:
+        return JSONResponse({"result": robot.resume(), "halted": False})
+    except RuntimeError as e:
+        return JSONResponse({"ok": False, "halted": True, "error": str(e)}, status_code=500)
 
 
 stream_app = Starlette(routes=[

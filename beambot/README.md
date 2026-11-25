@@ -21,7 +21,7 @@ BeamBot lets an AI agent operate a real robot car. The car is a battery-powered 
 
 The agent runs in a [Teleport Beam](https://goteleport.com/docs/beams/), a short-lived, isolated runtime for AI agents with no secrets inside. The Beam calls the car's MCP server through Teleport, which checks each tool call against the operator's access rules and records it in an audit log. The car connects outward through a reverse tunnel, so it needs no inbound ports, no static IP, and no VPN.
 
-The pattern isn't specific to the PiCar-X. Any robot, drone, or edge device that can run an MCP server and an outbound Teleport agent can be added the same way. You expose its capabilities as MCP tools, name them with the same `sense_*` and `act_*` convention, and the agent and access rules stay the same. To adapt BeamBot to your hardware, replace the car's MCP server with one that wraps your device's functions, then update the tool list and access roles.
+The pattern isn't specific to the PiCar-X. Any robot, drone, or edge device that can run an MCP server and an outbound Teleport agent can be added the same way. You expose its capabilities as MCP tools, and the agent and access rules stay the same. The PiCar-X's tools are `drive`, `look`, `say`, `snapshot`, `get_telemetry`, `stop` and `resume`, and its roles list them by name (`examples/picar-beambot/teleport/roles.yaml`). The five-Pi simulation instead puts the permission tier in the name (`sense_*` observe, `act_*` move, `admin_*` reset, `safety_*` everyone), which keeps role files short when a robot has many tools. Either works: pick one and list every tool in a role. To adapt BeamBot to your hardware, replace the car's MCP server with one that wraps your device's functions, then update the tool list and access roles.
 
 See the [architecture diagram](docs/beambot-architecture.pdf) (PDF) for how a command flows from the operator to the car.
 
@@ -92,11 +92,14 @@ the dashboard connects to the robot over MCP, runs the agent loop and writes its
 Teleport. `tsh mcp connect` and `tsh proxy mcp` work from a least-privilege beam against an MCP app served by a
 Teleport agent in Kubernetes, and the dashboard drives that robot through the tunnel. Claude Code inside the beam
 calls models once the beam has the `beam-user` role.
+A `picar-viewer` beam that opens the robot's MCP app as plain HTTP with `tsh proxy app` still gets the filtered tool
+list (`stop`, `get_telemetry`, `snapshot`), and a `drive` call is denied by Teleport RBAC
+(`tests/live/check_mcp_bypass.sh`).
 
 ## Tests
 
 ```bash
-make setup && make test        # ~2 min, no cluster needed
+make setup && make test        # about 5 min, no cluster needed
 make test-live                 # inside a real beam: proves MCP, tunnels and databases against real Teleport
 ```
 

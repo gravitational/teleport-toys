@@ -34,8 +34,8 @@ viewer-only agent asked to drive explains that it hasn't been granted the tool. 
 
 That filter only applies to MCP apps. So the robot serves **two ports**: `:8765` has `/mcp` and is published as the
 MCP app `picar-mcp`; `:8766` has the video, telemetry and a `/stop` button and is published as the plain HTTP app
-`picar-stream`, with no `/mcp` on it. A viewer who can open `picar-stream` can watch and stop the car, never drive
-it. The `picar-stream` role grants that app; add it next to `picar-viewer` or `picar-driver` for the video panel.
+`picar-stream`, with no `/mcp` on it. A viewer who can open `picar-stream` can watch, stop and resume the car, never
+drive it. The `picar-stream` role grants that app; add it next to `picar-viewer` or `picar-driver` for the video panel.
 
 ## Try it with no robot (2 minutes)
 
@@ -108,14 +108,17 @@ something that grants the robot.
 
 ```bash
 cd ../beam-app
-BEAM_ROLES=beam-user,mcp-user ROBOT_STREAM_APP= ./deploy-beam.sh        # prints the published URL
+BEAM_ROLES=beam-user,picar-driver,picar-stream ./deploy-beam.sh        # prints the published URL
 ```
 
-- `mcp-user` (built in) matches every MCP app, so the beam sees `picar-mcp` with all tools. It doesn't match the
-  video app, hence `ROBOT_STREAM_APP=` (no live video panel).
-- For video and a tool tier, create the roles once (`tctl create -f ../teleport/roles.yaml`) and use
-  `BEAM_ROLES=beam-user,picar-driver,picar-stream` (all tools plus video) or `beam-user,picar-viewer,picar-stream`
-  (look only: drive, aim and speak show up locked).
+Create the roles once (`tctl create -f ../teleport/roles.yaml`). `picar-driver` is every tool except `resume`, and
+`picar-stream` is video, telemetry and the Resume button. Use `beam-user,picar-viewer,picar-stream` for look only (drive,
+aim and speak show up locked).
+
+- **`mcp-user` is a shortcut with a catch.** The built-in `mcp-user` role matches every MCP app with every tool, so
+  `BEAM_ROLES=beam-user,mcp-user ROBOT_STREAM_APP= ./deploy-beam.sh` works without creating roles (no live video). But
+  it includes `resume`: anything running in that beam, such as Claude Code or a script, can lift an emergency stop.
+  The dashboard's own agent is never given `resume`, but the beam is. Use it only on a robot nobody is standing next to.
 - Check what the beam can reach with `tsh beams exec <beam> tsh mcp ls`.
 
 ### Tests
@@ -170,10 +173,23 @@ beam is refused too. STOP also cancels the dashboard's running chat job and auto
 every robot call except stop) until you press **Resume**. If the stop could not reach the robot the page says so, and if
 Resume can't reach it the robot stays stopped.
 
-Clearing the latch is deliberate. The `resume` tool is in neither `picar-viewer` nor `picar-driver`, so an agent can't undo
-a stop. Resume works through the stream app (`picar-stream`) or a role that grants `resume` (the built-in `mcp-user`
-does). Give `picar-stream` to the dashboard's beam and not to beams that run Claude Code. Everyday stops don't latch: letting go
-of the drive pad, or ending or cancelling an auto-map run, uses a plain speed-0 stop.
+Clearing the latch is deliberate. The `resume` tool is in neither `picar-viewer` nor `picar-driver`, so an agent
+running with those roles can't undo a stop. That is **not** true of a beam with the built-in `mcp-user` role, which
+grants every tool including `resume`: Claude Code in such a beam can undo a stop (the dashboard's agent still can't,
+because the app never gives it `resume`). Resume works through the stream app (`picar-stream`) or a role that grants
+`resume`. Give `picar-stream` to the dashboard's beam and not to beams that run Claude Code.
+
+- **The latch survives a restart.** It is saved to `$STATE_DIRECTORY/halted` (the systemd unit sets
+  `StateDirectory=picar-beambot`), so a server that crashed after STOP and was restarted by systemd is still latched.
+  The simulator keeps it in memory unless you set `HALT_FILE`; the Kubernetes example saves it on an `emptyDir`, which
+  survives a container restart but not a replaced pod. `HALT_FILE=` (empty) turns it off.
+- **Resume waits.** A drive sent just before STOP can still be on its way. Resume answers 409 until robot calls started
+  before STOP have finished, and for `RESUME_SETTLE_S` (5 s) after a STOP that found calls in flight. Press it again.
+- **A refused drive is an error.** The robot's latch refuses `drive` as a tool error, so the dashboard answers 423 and
+  logs it as failed.
+- **STOP also blocks chat and auto-map** while the robot reports `halted`, even when another client pressed the stop.
+- Everyday stops don't latch: letting go of the drive pad, or ending or cancelling an auto-map run, uses a plain
+  speed-0 stop.
 
 ## Put it on Teleport
 
@@ -274,3 +290,19 @@ The Data panel follows the selected task. Add your own by adding one entry to `T
 - The dashboard loads Lato from Google Fonts and Phosphor icons from unpkg. Offline, text falls back to system
   fonts and the icons are blank.
 - `mcp>=1.9,<2` only. The 2.x SDK renamed the APIs used here.
+
+## Check that the car stops when the server dies
+
+`robot/check_stop_on_kill.sh` runs **on the Pi, as root, car on blocks**. It drives, kills the server with SIGKILL
+(or SIGTERM), and asks whether the wheels stopped, so you see `ExecStopPost` work on real hardware. The `control`
+mode disables `ExecStopPost` first: the wheels should keep turning, which proves the check can fail.
+
+**Status: not yet run on hardware.** The units run `ExecStopPost` (zero the motors) after any exit, and systemd
+documents that it runs after a kill, but nobody has watched it stop a real car after SIGKILL, and we have not
+confirmed that the Robot HAT holds its last PWM duty without it. Until someone has run this script on a PiCar-X,
+treat the other safeguards (drive deadlines, fail-closed ultrasonic stop, zeroing at startup and on SIGTERM, the
+STOP latch) as the protection, and keep the car on blocks when you test.
+
+```bash
+sudo bash robot/check_stop_on_kill.sh kill      # also: term, control
+```

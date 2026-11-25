@@ -8,7 +8,7 @@ Run them **inside a beam** (or anywhere `tsh status` shows an active session):
 ```bash
 tsh beams add --roles picar-driver        # roles must be eligible for delegation
 tsh beams ssh <beam>
-git clone <this repo> && cd beambot
+git clone https://github.com/gravitational/teleport-toys && cd teleport-toys/beambot
 python3 -m pip install --user --break-system-packages -r tests/requirements.txt   # beams have no python3-venv
 PY=python3 make test-live
 ```
@@ -23,3 +23,14 @@ PY=python3 make test-live
 | `LIVE_DRIVE` | unset | `1` also asserts the robot can move (needs a driver role; the robot will move!) |
 
 Tests skip, rather than fail, for resources your roles can't see: that is RBAC working.
+
+## Is the tool filter really on the only way in?
+
+`check_mcp_bypass.sh` runs inside a **least-privilege beam** (`tsh beams add --roles beam-user,picar-viewer`) and
+tries to reach the robot's MCP app as plain HTTP through `tsh proxy app`, listing and calling `drive` without
+the MCP tool filter. It also confirms the video/telemetry app does not serve `/mcp`. `RESULT: PASS` means the
+viewer could not see or call `drive` that way. Run it again after changing roles.
+
+```bash
+bash tests/live/check_mcp_bypass.sh            # [mcp-app] [stream-app], defaults picar-mcp picar-stream
+```

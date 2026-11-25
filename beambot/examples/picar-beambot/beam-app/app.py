@@ -14,6 +14,7 @@ State (counts) lives in Postgres if DATABASE_URL is set, otherwise SQLite.
 """
 import asyncio
 import base64
+import contextlib
 import json
 import math
 import os
@@ -620,6 +621,38 @@ class Halted(Exception):
     pass
 
 
+# Tools the dashboard's agent never gets, whatever the dashboard's beam is allowed to list: `resume` lifts an emergency
+# stop, and only a human does that (the Resume button). With the built-in `mcp-user` role list_tools returns it.
+AGENT_HIDDEN_TOOLS = {"resume"}
+LATCH_MARK = "emergency stop is latched"   # what the robot's refused `drive` says
+
+# Robot calls that are on the wire. A drive sent before STOP can still reach the robot after it, so Resume waits for
+# these, and for RESUME_SETTLE_S after a STOP that found calls in flight (a cancelled call leaves no trace here).
+RESUME_SETTLE_S = float(os.environ.get("RESUME_SETTLE_S", "5"))
+flight = {"n": 0}
+
+
+class in_flight:
+    def __enter__(self):
+        flight["n"] += 1
+
+    def __exit__(self, *exc):
+        flight["n"] -= 1
+
+
+async def robot_latched_now():
+    """Is the robot latched right now, whoever latched it? Asks the robot, not the last poll: a stop pressed by another
+    client a moment ago must already block chat."""
+    if halt["on"]:
+        return True
+    try:
+        async with httpx.AsyncClient(timeout=2) as http:
+            r = await http.get(f"{ROBOT_STREAM_URL}/telemetry")
+        return bool(r.json().get("halted"))
+    except Exception:  # noqa: BLE001  can't ask: use the last poll
+        return robot_latched()
+
+
 async def run_job(job, message, task):
     async with chat_lock:  # one robot, one conversation at a time
         start = len(history)
@@ -638,7 +671,7 @@ async def run_job(job, message, task):
 async def chat(req: Request):
     body = await req.json()
     task = TASKS.get(body.get("task"), TASKS["count"])
-    if halt["on"]:
+    if await robot_latched_now():
         return JSONResponse({"detail": HALT_MSG}, status_code=423)
     if chat_lock.locked():
         return JSONResponse({"detail": "BeamBot is still working on the previous message."}, status_code=409)
@@ -804,7 +837,7 @@ async def run_agent(message, task, trace=None):
         async with ClientSession(r, w) as session:
             await session.initialize()
             robot_tools = [{"name": t.name, "description": t.description or "", "input_schema": t.inputSchema}
-                           for t in (await session.list_tools()).tools]
+                           for t in (await session.list_tools()).tools if t.name not in AGENT_HIDDEN_TOOLS]
             robot_names = {t["name"] for t in robot_tools}
             tools = robot_tools + LOCAL_TOOLS
             for _ in range(20):  # max agent steps per message
@@ -833,15 +866,20 @@ async def run_agent(message, task, trace=None):
                             content = [{"type": "text", "text": json.dumps(tally(), default=str)}]
                         elif b.name == "get_map_summary":
                             content = [{"type": "text", "text": json.dumps(office_map.summary())}]
+                        elif b.name not in robot_names:   # includes the hidden `resume`: never forwarded to the robot
+                            content = [{"type": "text", "text": f"error: unknown tool {b.name}"}]
                         else:
                             if halt["on"] and b.name != "stop":
                                 raise Halted(HALT_MSG)
                             if b.name == "drive":
                                 auto_mapper.stop("chat agent took over")
-                            res = await session.call_tool(b.name, b.input)
+                            with in_flight():
+                                res = await session.call_tool(b.name, b.input)
                             content = mcp_content_to_claude(res)
                             first = next((c["text"] for c in content if c["type"] == "text"), "image")
                             log_activity(b.name, b.input, not res.isError, round((time.time() - t0) * 1000), first)
+                            if res.isError and LATCH_MARK in first:   # latched by someone else: end the run
+                                raise Halted(HALT_MSG)
                     except Halted:
                         raise   # end the run: do not hand an error back to the model and let it try again
                     except Exception as e:  # noqa: BLE001
@@ -907,7 +945,10 @@ async def stop():
     """Emergency stop: latch it on the robot first, then end everything in this app that could move the robot.
     Only a 200 means the robot was told to stop: anything else is reported as an error. Cancelling the chat job
     stops NEW calls; the latch on the robot is what refuses the ones that were already sent."""
+    flying = flight["n"] > 0
     halt.update(on=True, at=time.time())
+    if flying:   # whatever is on the wire may still arrive, even if its task is cancelled below
+        halt["quiet_until"] = max(halt.get("quiet_until", 0), time.time() + RESUME_SETTLE_S)
     manual_stop["gen"] += 1
     auto_mapper.stop("emergency stop")
     ok, via, text = await robot_estop()
@@ -922,13 +963,23 @@ async def stop():
 
 
 @app.post("/api/resume")
-async def resume():
+async def resume(request: Request):
     """Clear the latch on the robot (stream app, or the MCP `resume` tool), then in this app. If the robot can't be
-    reached the latch stays: the page keeps showing Resume."""
+    reached the latch stays: the page keeps showing Resume. Refused while a robot call sent before STOP could still
+    land, and for a JSON POST only from this page (a form or text/plain request from another site is refused)."""
+    if (request.headers.get("sec-fetch-site", "same-origin") not in ("same-origin", "none")
+            or "application/json" not in request.headers.get("content-type", "")):
+        return JSONResponse({"ok": False, "error": "Resume must be pressed on the dashboard page."}, status_code=403)
+    wait = halt.get("quiet_until", 0) - time.time()
+    if flight["n"] > 0 or wait > 0:
+        secs = max(1, int(wait + 0.99))
+        return JSONResponse({"ok": False, "halted": True, "retry_after": secs,
+                             "error": f"Not yet: a robot call sent before STOP may still be on its way. Try again in {secs} s."},
+                            status_code=409, headers={"Retry-After": str(secs)})
     errors = []
     try:
         async with httpx.AsyncClient(timeout=3) as http:
-            r = await http.post(f"{ROBOT_STREAM_URL}/resume")
+            r = await http.post(f"{ROBOT_STREAM_URL}/resume", json={})
         r.raise_for_status()
         via = "stream"
     except Exception as e:  # noqa: BLE001
@@ -939,7 +990,7 @@ async def resume():
                           " (resuming needs the picar-stream role, or a role that grants the `resume` tool)")
             return JSONResponse({"ok": False, "halted": True, "error": "; ".join(errors)}, status_code=502)
         via = "mcp"
-    halt.update(on=False, at=None, cleared=time.time())
+    halt.update(on=False, at=None, cleared=time.time(), quiet_until=0)
     return {"ok": True, "halted": False, "via": via}
 
 
@@ -954,17 +1005,22 @@ async def robot_call(tool, args):
     t0 = time.time()
     try:
         blocked = False
-        async with streamablehttp_client(ROBOT_MCP_URL) as (r, w, _):
-            async with ClientSession(r, w) as s:
-                await s.initialize()          # can take seconds: STOP may have been pressed meanwhile
-                if halt["on"] and tool not in EXEMPT_WHEN_HALTED:
-                    blocked = True
-                else:
-                    res = await s.call_tool(tool, args)
+        # Counted from here, not from the tool call: opening the session can take seconds, and a drive that is still
+        # opening its session when STOP is pressed is exactly the one Resume must wait for.
+        with in_flight() if tool not in EXEMPT_WHEN_HALTED else contextlib.nullcontext():
+            async with streamablehttp_client(ROBOT_MCP_URL) as (r, w, _):
+                async with ClientSession(r, w) as s:
+                    await s.initialize()          # can take seconds: STOP may have been pressed meanwhile
+                    if halt["on"] and tool not in EXEMPT_WHEN_HALTED:
+                        blocked = True
+                    else:
+                        res = await s.call_tool(tool, args)
         if blocked:
             return refused
         text = next((c.text for c in res.content if c.type == "text"), "")
         log_activity(tool, args, not res.isError, round((time.time() - t0) * 1000), "manual: " + text)
+        if res.isError and LATCH_MARK in text:   # the robot's own latch refused it (stopped by another client)
+            return refused
         return JSONResponse({"ok": not res.isError, "result": text}, status_code=502 if res.isError else 200)
     except Exception as e:  # noqa: BLE001
         log_activity(tool, args, False, round((time.time() - t0) * 1000), f"manual: {e}")
@@ -1013,17 +1069,20 @@ async def auto_call(tool, args):
     t0 = time.time()
     try:
         blocked = False
-        async with streamablehttp_client(ROBOT_MCP_URL) as (r, w, _):
-            async with ClientSession(r, w) as s:
-                await s.initialize()
-                if halt["on"] and tool not in EXEMPT_WHEN_HALTED:
-                    blocked = True
-                else:
-                    res = await s.call_tool(tool, args)
+        with in_flight() if tool not in EXEMPT_WHEN_HALTED else contextlib.nullcontext():
+            async with streamablehttp_client(ROBOT_MCP_URL) as (r, w, _):
+                async with ClientSession(r, w) as s:
+                    await s.initialize()
+                    if halt["on"] and tool not in EXEMPT_WHEN_HALTED:
+                        blocked = True
+                    else:
+                        res = await s.call_tool(tool, args)
         if blocked:
             return False, HALT_MSG
         text = next((c.text for c in res.content if c.type == "text"), "")
         log_activity(tool, args, not res.isError, round((time.time() - t0) * 1000), "auto: " + text)
+        if res.isError and LATCH_MARK in text:
+            return False, HALT_MSG
         return not res.isError, text
     except Exception as e:  # noqa: BLE001
         log_activity(tool, args, False, round((time.time() - t0) * 1000), f"auto: {e}")
@@ -1034,7 +1093,7 @@ async def auto_call(tool, args):
 async def automap_start(req: Request):
     """Body (all optional): speed 15-40, max_moves, max_minutes, vision (camera + model during scans, default on)."""
     b = await req.json() if (await req.body()) else {}
-    if halt["on"]:
+    if await robot_latched_now():
         return JSONResponse({"ok": False, "error": HALT_MSG}, status_code=423)
     on_view = describe_view if b.get("vision", True) else None
     if not auto_mapper.start(auto_call, speed=b.get("speed"), max_moves=b.get("max_moves"),
