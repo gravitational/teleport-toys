@@ -21,7 +21,7 @@ import httpx
 import pytest
 import yaml
 
-from conftest import ROOT, ROBOT_DIR, BEAM_APP, _clean_env, free_port, wait_http  # noqa
+from conftest import ROOT, ROBOT_DIR, BEAM_APP, _clean_env, free_port, wait_http, wait_robot_ready  # noqa
 
 EXAMPLE = ROOT / "examples/picar-beambot"
 MCP_LABEL = "teleport.internal/app-sub-kind"
@@ -39,7 +39,7 @@ def own_robot():
                              env=_clean_env(SIMULATE=1, ROBOT_PORT=port, STREAM_PORT=stream, SAY_CMD="true", **env),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         procs.append(p)
-        wait_http(f"http://127.0.0.1:{stream}/telemetry")
+        wait_robot_ready(f"http://127.0.0.1:{stream}")
         return SimpleNamespace(proc=p, port=port, stream_port=stream, mcp=f"http://127.0.0.1:{port}/mcp",
                                mcp_base=f"http://127.0.0.1:{port}", stream=f"http://127.0.0.1:{stream}")
 
@@ -91,6 +91,14 @@ def _apps_and_roles():
     return {"robot/teleport.yaml": robot, "k8s values": k8s}, roles
 
 
+def _page_roles():
+    """The example role(s) the dashboard page prints and tells readers to copy."""
+    html = (EXAMPLE / "beam-app/static/index.html").read_text()
+    blocks = re.findall(r"<pre>(kind: role.*?)</pre>", html, re.S)
+    assert blocks, "the page no longer prints an example role: update this test"
+    return {d["metadata"]["name"]: d["spec"]["allow"] for d in map(yaml.safe_load, blocks)}
+
+
 def _port(uri):
     return uri.rsplit(":", 1)[1].split("/")[0]
 
@@ -107,10 +115,13 @@ def test_the_http_app_is_never_on_the_port_that_serves_mcp():
 def test_roles_cannot_reach_the_stream_app_with_a_tool_grant():
     """Replays Teleport's label matching: a role matches an app when every label it names is present."""
     sets, roles = _apps_and_roles()
+    page = _page_roles()
+    assert not set(page) & set(roles), "the page's example must not shadow a shipped role"
+    roles = {**roles, **page}
     for where, apps in sets.items():
         eff = {a["name"]: {**a["labels"], **({MCP_LABEL: "mcp"} if a["uri"].startswith("mcp+") else {})} for a in apps}
         matches = lambda role, app: all(eff[app].get(k) == v for k, v in roles[role]["app_labels"].items())  # noqa: E731
-        for role in ("picar-driver",):
+        for role in ("picar-driver", *page):
             assert roles[role]["mcp"]["tools"]
             assert roles[role]["app_labels"].get(MCP_LABEL) == "mcp", f"{role} must only ever match MCP apps"
             assert matches(role, "picar-mcp") and not matches(role, "picar-stream"), (where, role)
@@ -1013,7 +1024,10 @@ def test_stop_does_not_wait_for_the_disk(rm, monkeypatch, tmp_path):
         r.drive(20, 0.5, 0, wait=False)             # the lock is free: this must not queue behind the write
     assert time.time() - t1 < 0.3
     th.join(5)
-    assert (tmp_path / "halted").exists() and time.time() - t0 >= 2.0
+    assert time.time() - t0 < 1.0, "the stop's answer waited for the disk"
+    while not (tmp_path / "halted").exists() and time.time() - t0 < 5:
+        time.sleep(0.05)
+    assert (tmp_path / "halted").exists() and time.time() - t0 >= 2.0 and r.halt_saved
 
 
 def test_a_resume_that_races_the_slow_latch_write_leaves_a_consistent_state(rm, monkeypatch, tmp_path):

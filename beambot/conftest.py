@@ -41,6 +41,24 @@ def wait_http(url, timeout=30):
     raise TimeoutError(f"{url} did not come up")
 
 
+def wait_robot_ready(stream_base, timeout=30):
+    """Wait until a freshly started robot can drive, not just answer.
+
+    Known issue (workaround): robot_mcp.py starts serving MCP and /telemetry a few ms before its control loop takes the
+    first ultrasonic reading. Until then `distance` is -1 and a forward `drive` is refused with "no valid distance
+    reading" (fail-closed, by design). A test that drove straight after `wait_http(.../telemetry)` failed now and then.
+    So wait for a real reading: telemetry's `ultrasonic_cm > 0`. Use this, not wait_http, before a test drives."""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            if httpx.get(f"{stream_base}/telemetry", timeout=2).json().get("ultrasonic_cm", -1) > 0:
+                return
+        except Exception:
+            pass
+        time.sleep(0.05)
+    raise TimeoutError(f"{stream_base} never reported a distance reading")
+
+
 def _clean_env(**extra):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("OPENAI_", "ANTHROPIC_", "TELEPORT_", "LLM_", "DATABASE_", "REDIS_", "USE_"))}
@@ -55,7 +73,7 @@ def robot():
     p = subprocess.Popen([sys.executable, str(ROBOT_DIR / "robot_mcp.py")], cwd=ROBOT_DIR,
                          env=_clean_env(SIMULATE=1, ROBOT_PORT=port, STREAM_PORT=stream_port, SAY_CMD="true"),
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    wait_http(f"http://127.0.0.1:{stream_port}/telemetry")
+    wait_robot_ready(f"http://127.0.0.1:{stream_port}")
     # `base` is the stream app (video, telemetry, stop: what picar-stream publishes), `mcp` the MCP endpoint.
     yield SimpleNamespace(port=port, stream_port=stream_port, base=f"http://127.0.0.1:{stream_port}",
                           mcp=f"http://127.0.0.1:{port}/mcp", mcp_base=f"http://127.0.0.1:{port}")

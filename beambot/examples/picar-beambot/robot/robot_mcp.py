@@ -73,6 +73,9 @@ def _halt_file():
 
 
 HALT_FILE = _halt_file()
+# A STOP answers once the motors are stopped and the latch is set. It waits at most this long for the latch to reach
+# the disk (normally a few ms), then answers anyway and says the restart-proof copy is still being written.
+HALT_SAVE_WAIT_S = float(os.environ.get("HALT_SAVE_WAIT_S", "0.3"))
 
 
 class StopFailed(RuntimeError):
@@ -149,7 +152,15 @@ class Robot:
         self.need_stop = False      # a stop was requested but the hardware call failed: retry every pass
         self.halted = self._load_halt()   # emergency-stop latch: drive is refused until resume()
         self.halt_gen = 0                 # bumped by every stop and resume, so a late file write can tell it is stale
-        self.halt_io = threading.Lock()   # serializes the latch FILE only: never held with the robot lock
+        self.halt_io = threading.Lock()   # serializes the latch FILE only: never taken while holding the robot lock
+        # True once the latch file is known to be on disk, so a second STOP doesn't write it again.
+        self.halt_saved = bool(self.halted and HALT_FILE and os.path.exists(HALT_FILE))
+        # The latch file is written by one writer thread, so a STOP never waits on the disk and stops pressed during a
+        # stalled write share that one write instead of queueing their own. save_req/save_done count requests.
+        self.save_cv = threading.Condition()
+        self.save_req = self.save_done = 0
+        self.save_err = ""
+        threading.Thread(target=self._latch_writer, name="latch-writer", daemon=True).start()
 
         if SIMULATE:
             self.car = SimCar()
@@ -405,27 +416,45 @@ class Robot:
             return str(e)
         return ""
 
+    def _latch_writer(self):
+        """Saves the latch to disk whenever a STOP asks, unless it is already saved or a Resume got in first."""
+        while True:
+            with self.save_cv:
+                self.save_cv.wait_for(lambda: self.save_req != self.save_done)
+                req = self.save_req
+            err = ""
+            with self.halt_io:
+                if self.halted and not self.halt_saved:
+                    err = self._save_halt(True)
+                    self.halt_saved = not err
+            with self.save_cv:
+                self.save_done, self.save_err = req, err
+                self.save_cv.notify_all()
+
     def emergency_stop(self):
         """Stop the motors and latch, in that order of urgency: the latch flag and the hardware stop come first, under
-        the robot lock, and nothing slow runs there. The latch is then saved to disk OUTSIDE the lock (a stalled SD
-        card must never delay a stop). The latch holds even if the hardware stop fails (the control loop keeps
-        retrying it) and across a restart once the file is written."""
+        the robot lock, and nothing slow runs there. The latch is then saved to disk by the writer thread; this waits
+        for it at most HALT_SAVE_WAIT_S (a stalled SD card must never delay a stop or its answer). The latch holds even
+        if the hardware stop fails (the control loop keeps retrying it) and across a restart once the file is written."""
         with self.lock:
             self.halted = True
             self.halt_gen += 1
-            gen = self.halt_gen
             stop_error = None
             try:
                 self._stop("emergency stop")
             except Exception as e:  # noqa: BLE001
                 stop_error = e
                 self.last_event = f"emergency stop: hardware stop FAILED ({e}); latched, retrying"
-        not_saved = ""
-        with self.halt_io:
-            if self.halted and self.halt_gen == gen:   # skip if a Resume (or a newer stop) got in first
-                not_saved = self._save_halt(True)
+        with self.save_cv:
+            self.save_req += 1
+            req = self.save_req
+            self.save_cv.notify_all()
+            written = self.save_cv.wait_for(lambda: self.save_done >= req, timeout=HALT_SAVE_WAIT_S)
+            not_saved = self.save_err if written else ""
         if stop_error is not None:
             raise StopFailed(self.last_event) from stop_error
+        if not written:
+            return "stopped (the latch is still being saved to disk: until it is, a restart would clear it)"
         return "stopped" + (f" (WARNING: the latch could not be saved, a restart would clear it: {not_saved})"
                             if not_saved else "")
 
@@ -440,6 +469,8 @@ class Robot:
             with self.lock:
                 gen = self.halt_gen
             failed = self._save_halt(False)
+            if not failed:
+                self.halt_saved = False
             if failed:   # the saved latch is still there: stay latched, or a restart would bring it back
                 raise RuntimeError(f"still latched: could not clear the saved latch ({failed})")
             with self.lock:
@@ -490,6 +521,7 @@ class Robot:
                 "camera": {"pan": self.pan, "tilt": self.tilt},
                 "moving": self.speed != 0,
                 "halted": self.halted,
+                "latch_saved": self.halt_saved,   # the latch is on disk, so it survives a restart
                 "speed": self.speed,
                 "steer": self.steer,
                 "last_event": self.last_event,
@@ -522,16 +554,16 @@ async def look(pan_deg: int = 0, tilt_deg: int = 0) -> str:
 
 
 @mcp.tool()
-def stop() -> str:
+async def stop() -> str:
     """Emergency stop: stop all motion now and refuse `drive` until a human resumes. `drive` already ends by
     itself, so only call this to abort a move, not to finish one."""
-    return robot.emergency_stop() + " (latched: drive is refused until resumed)"
+    return await asyncio.to_thread(robot.emergency_stop) + " (latched: drive is refused until resumed)"
 
 
 @mcp.tool()
-def resume() -> str:
+async def resume() -> str:
     """Clear the emergency-stop latch so `drive` works again. Not part of the default `picar-driver` role."""
-    return robot.resume()
+    return await asyncio.to_thread(robot.resume)   # may wait on the disk: never on the server's only thread
 
 
 @mcp.tool()
@@ -583,7 +615,7 @@ async def video_route(request: Request):
 
 async def stop_route(request: Request):
     try:
-        return JSONResponse({"result": robot.emergency_stop(), "halted": True})
+        return JSONResponse({"result": await asyncio.to_thread(robot.emergency_stop), "halted": True})
     except StopFailed as e:   # still latched, but say so: the car may be moving
         return JSONResponse({"ok": False, "halted": True, "error": str(e)}, status_code=500)
 
@@ -603,7 +635,7 @@ async def resume_route(request: Request):
         return JSONResponse({"error": "resume must be a JSON POST from the dashboard, not a browser page"},
                             status_code=403)
     try:
-        return JSONResponse({"result": robot.resume(), "halted": False})
+        return JSONResponse({"result": await asyncio.to_thread(robot.resume), "halted": False})
     except RuntimeError as e:
         return JSONResponse({"ok": False, "halted": True, "error": str(e)}, status_code=500)
 

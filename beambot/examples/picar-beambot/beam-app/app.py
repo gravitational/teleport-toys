@@ -921,6 +921,44 @@ async def reset(req: Request):
 
 
 _bg = set()   # keeps the slower of the two stops running after the faster one answered
+# Both STOP routes give up after these, so /api/stop always answers (the page shows "STOP FAILED" rather than hang).
+STREAM_STOP_TIMEOUT_S = float(os.environ.get("STREAM_STOP_TIMEOUT_S", "2"))
+MCP_STOP_TIMEOUT_S = float(os.environ.get("MCP_STOP_TIMEOUT_S", "5"))
+# Each STOP sends its own MCP stop (an earlier one may have reached the robot before a Resume, so its answer can't
+# stand for a new press). Past this many still waiting, a STOP skips the MCP route and relies on the stream app.
+MAX_MCP_STOPS_IN_FLIGHT = 3
+_mcp_stops = set()
+
+
+async def _stop_via_stream():
+    async with httpx.AsyncClient(timeout=STREAM_STOP_TIMEOUT_S) as http:
+        r = await http.post(f"{ROBOT_STREAM_URL}/stop")
+    r.raise_for_status()
+    return "stream", r.json().get("result", "stopped")
+
+
+async def _stop_via_mcp():
+    try:
+        resp = await asyncio.wait_for(robot_call("stop", {}), MCP_STOP_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        raise TimeoutError(f"no answer in {MCP_STOP_TIMEOUT_S:g} s") from None
+    body = json.loads(resp.body)
+    if not body.get("ok"):
+        raise RuntimeError(body.get("error") or body.get("result"))
+    return "mcp", body.get("result", "stopped")
+
+
+async def _too_many_mcp_stops():
+    raise RuntimeError(f"skipped: {len(_mcp_stops)} earlier MCP stops are still waiting for the robot")
+
+
+def _new_mcp_stop():
+    if len(_mcp_stops) >= MAX_MCP_STOPS_IN_FLIGHT:
+        return asyncio.create_task(_too_many_mcp_stops())
+    t = asyncio.create_task(_stop_via_mcp())
+    _mcp_stops.add(t)
+    t.add_done_callback(_mcp_stops.discard)
+    return t
 
 
 async def robot_estop():
@@ -929,20 +967,8 @@ async def robot_estop():
     other made STOP wait out a hung video app before it even tried the MCP route. Both stop the motors and make the
     robot refuse `drive` until it is resumed, so a drive that is already on the wire (a pad press whose MCP session is
     still opening, an agent call mid-flight) or one from another client is refused when it arrives.
-    Returns (ok, via, text-or-errors)."""
-    async def via_stream():
-        async with httpx.AsyncClient(timeout=2) as http:
-            r = await http.post(f"{ROBOT_STREAM_URL}/stop")
-        r.raise_for_status()
-        return "stream", r.json().get("result", "stopped")
-
-    async def via_mcp():
-        body = json.loads((await robot_call("stop", {})).body)
-        if not body.get("ok"):
-            raise RuntimeError(body.get("error") or body.get("result"))
-        return "mcp", body.get("result", "stopped")
-
-    names = {asyncio.create_task(via_stream()): "stream app", asyncio.create_task(via_mcp()): "MCP stop"}
+    Each route has a timeout, so this always returns. Returns (ok, via, text-or-errors)."""
+    names = {asyncio.create_task(_stop_via_stream()): "stream app", _new_mcp_stop(): "MCP stop"}
     pending, errors = set(names), []
     while pending:
         done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)

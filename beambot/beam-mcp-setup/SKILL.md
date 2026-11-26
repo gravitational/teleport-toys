@@ -30,8 +30,8 @@ Needs `tsh` 18.11.9+ on your laptop. Reference: <https://goteleport.com/docs/bea
 ### 0. Gather inputs (ask only for what you can't infer)
 
 - **Which MCP servers**: a label selector such as `robot=beambot-sim`. Check with `tsh mcp ls -v`.
-- **Which roles the beam should carry**: ideally a dedicated least-privilege role (a viewer, say) rather
-  than your admin roles. Check `tctl get roles` first for name clashes.
+- **Which roles the beam should carry**: ideally a dedicated least-privilege role (one whose `mcp.tools`
+  lists only the tools the agent needs) rather than your admin roles. Check `tctl get roles` first for name clashes.
 - **Tool policy**: which tool name patterns Claude Code may auto-allow (e.g. `sense_*,safety_*`) and which
   to deny (e.g. `admin_*`).
 

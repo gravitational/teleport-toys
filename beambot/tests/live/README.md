@@ -38,6 +38,12 @@ answer, a list that doesn't look like this robot's, or an error that isn't Telep
 app check is **SKIPPED** from a beam without it, because the driver role can't see `picar-stream`; `REQUIRE_STREAM=1` turns a skip
 into INCONCLUSIVE, and the line `checks: N passed, N failed, ...` says what ran.
 
+The check never lifts a STOP on purpose. It calls `get_telemetry` first and sends the real `resume` only when the robot
+says `halted: false`. If the robot is latched, or the latch can't be read, it skips the call and reports INCONCLUSIVE:
+resume from the dashboard and run it again. If the tool list already shows `resume`, that is a FAIL and it isn't called.
+A STOP pressed in the few milliseconds between the two calls could still be cleared if the bypass is open, so don't run
+the check while someone may need the STOP.
+
 ```bash
 bash tests/live/check_mcp_bypass.sh            # [mcp-app] [stream-app], defaults picar-mcp picar-stream
 ```

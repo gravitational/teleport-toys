@@ -12,6 +12,11 @@ FAKE_MODE picks the behaviour:
   silent       tsh prints nothing, never listens                                               -> INCONCLUSIVE
   refuses      tsh exits with an error                                                         -> INCONCLUSIVE
   denied_init  initialize gets a 403 with Teleport's text                                      -> PASS
+  forward      a plain proxy with no tool filter, forwarding to the real MCP endpoint in FAKE_UPSTREAM (the bypass)
+  forward_hide like forward, but tools/list hides resume (a list filter with no call filter)
+FAKE_HALTED=1 makes get_telemetry report the robot latched (halted: true), FAKE_HALTED=missing leaves the field out;
+otherwise it reports halted: false.
+FAKE_CALLS=<file> appends the name of every tools/call the fake receives, one per line.
 FAKE_STREAM=missing makes `proxy app picar-stream` say the app is not found.
 """
 import json
@@ -19,6 +24,8 @@ import os
 import socketserver
 import sys
 import time
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler
 
 MODE = os.environ.get("FAKE_MODE", "good")
@@ -39,10 +46,40 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def forward(self, raw, method):
+        hdr = {k: v for k, v in self.headers.items() if k.lower() in ("content-type", "accept", "mcp-session-id", "mcp-protocol-version")}
+        req = urllib.request.Request(os.environ["FAKE_UPSTREAM"], data=raw, headers=hdr, method="POST")
+        try:
+            r = urllib.request.urlopen(req, timeout=15)
+        except urllib.error.HTTPError as e:
+            r = e
+        data = r.read()
+        if MODE == "forward_hide" and method == "tools/list":
+            def hide(line):
+                if not line.startswith(b"data:"):
+                    return line
+                msg = json.loads(line[5:])
+                msg["result"]["tools"] = [t for t in msg["result"]["tools"] if t["name"] != "resume"]
+                return b"data: " + json.dumps(msg).encode()
+            data = b"\n".join(hide(x) for x in data.split(b"\n"))
+        self.send_response(r.status)
+        for k, v in r.headers.items():
+            if k.lower() in ("content-type", "mcp-session-id"):
+                self.send_header(k, v)
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
+        raw = self.rfile.read(int(self.headers.get("content-length", 0)))
+        body = json.loads(raw or b"{}")
         if self.server.stream:
             return self.reply(404, raw=b"not found")
+        if body.get("method") == "tools/call" and os.environ.get("FAKE_CALLS"):
+            with open(os.environ["FAKE_CALLS"], "a") as f:
+                f.write(body["params"]["name"] + "\n")
+        if MODE.startswith("forward"):
+            return self.forward(raw, body.get("method"))
         if MODE == "dead":
             self.connection.close()
             return
@@ -55,6 +92,11 @@ class H(BaseHTTPRequestHandler):
             names = {"empty_list": [], "wrong_list": ["foo", "bar"], "leaky_list": ["drive", "get_telemetry", "resume", "snapshot", "stop"]}.get(
                 MODE, ["drive", "get_telemetry", "look", "say", "snapshot", "stop"])
             return self.reply(200, {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": n} for n in names]}})
+        if m == "tools/call" and body["params"]["name"] == "get_telemetry":
+            t = {"moving": False}
+            if os.environ.get("FAKE_HALTED") != "missing":
+                t["halted"] = os.environ.get("FAKE_HALTED") == "1"
+            return self.reply(200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {"content": [{"type": "text", "text": json.dumps(t)}], "isError": False}})
         if m == "tools/call":
             if MODE == "leaky_call" or MODE == "leaky_list":
                 return self.reply(200, {"jsonrpc": "2.0", "id": 3, "result": {"content": [{"type": "text", "text": "driving"}], "isError": False}})

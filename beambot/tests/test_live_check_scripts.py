@@ -65,6 +65,66 @@ def test_a_skipped_stream_check_is_said_out_loud_and_can_be_required(run_check):
     assert rc == 2 and "RESULT: INCONCLUSIVE" in out, out
 
 
+# --------------------------------------------------------------------------- the check must never clear a STOP
+def _calls(path):
+    return path.read_text().split() if path.exists() else []
+
+
+def test_a_latched_robot_is_never_sent_resume(run_check, tmp_path):
+    calls = tmp_path / "calls.txt"
+    rc, out = run_check("leaky_call", FAKE_HALTED=1, FAKE_CALLS=calls)
+    assert rc == 2 and "RESULT: INCONCLUSIVE" in out and "LATCHED" in out, out
+    assert "resume" not in _calls(calls), "the check sent resume to a latched robot"
+
+
+def test_an_unreadable_latch_is_never_sent_resume(run_check, tmp_path):
+    calls = tmp_path / "calls.txt"
+    rc, out = run_check("leaky_call", FAKE_HALTED="missing", FAKE_CALLS=calls)
+    assert rc == 2 and "RESULT: INCONCLUSIVE" in out and "could not read the latch" in out, out
+    assert "resume" not in _calls(calls)
+
+
+def test_a_list_that_shows_resume_fails_without_calling_it(run_check, tmp_path):
+    calls = tmp_path / "calls.txt"
+    rc, out = run_check("leaky_list", FAKE_CALLS=calls)
+    assert rc == 1 and "RESULT: FAIL" in out, out
+    assert "resume" not in _calls(calls)
+
+
+@pytest.fixture
+def sim():
+    import httpx
+    from types import SimpleNamespace
+    from conftest import ROBOT_DIR, _clean_env, wait_robot_ready
+    port, sport = free_port(), free_port()
+    p = subprocess.Popen([sys.executable, str(ROBOT_DIR / "robot_mcp.py")], cwd=ROBOT_DIR,
+                         env=_clean_env(SIMULATE=1, ROBOT_PORT=port, STREAM_PORT=sport, SAY_CMD="true", HALT_FILE=""),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    wait_robot_ready(f"http://127.0.0.1:{sport}")
+    halted = lambda: httpx.get(f"http://127.0.0.1:{sport}/telemetry").json()["halted"]  # noqa: E731
+    yield SimpleNamespace(mcp=f"http://127.0.0.1:{port}/mcp", stop=lambda: httpx.post(f"http://127.0.0.1:{sport}/stop"), halted=halted)
+    p.terminate()
+    p.wait(5)
+
+
+@pytest.mark.parametrize("mode", ["forward", "forward_hide"])
+def test_the_reviewers_bypass_against_a_latched_simulator_keeps_the_stop(run_check, sim, mode):
+    """A plain proxy to the simulator's unfiltered /mcp, robot latched through /stop: the check must not lift it."""
+    sim.stop()
+    assert sim.halted() is True
+    rc, out = run_check(mode, FAKE_UPSTREAM=sim.mcp, FAKE_STREAM="missing")
+    assert "RESULT: PASS" not in out, out
+    assert rc == (1 if mode == "forward" else 2), out
+    assert sim.halted() is True, "running the check cleared the STOP:\n" + out
+
+
+def test_an_unlatched_simulator_behind_a_list_only_filter_fails(run_check, sim):
+    """The gate still lets the check prove the bypass when nobody has pressed STOP."""
+    assert sim.halted() is False
+    rc, out = run_check("forward_hide", FAKE_UPSTREAM=sim.mcp, FAKE_STREAM="missing")
+    assert rc == 1 and "halted=false" in out and "REACHED THE ROBOT" in out, out
+
+
 # --------------------------------------------------------------------------- robot/check_stop_on_kill.sh
 KILL_SCRIPT = ROOT / "examples/picar-beambot/robot/check_stop_on_kill.sh"
 
@@ -74,7 +134,7 @@ def kill_check(tmp_path):
     """Runs check_stop_on_kill.sh with a fake systemctl, id and journalctl in front of a real simulated robot."""
     import subprocess as sp
     import time
-    from conftest import ROBOT_DIR, _clean_env, wait_http
+    from conftest import ROBOT_DIR, _clean_env, wait_http, wait_robot_ready
     bin_dir, log, pidfile = tmp_path / "bin", tmp_path / "systemctl.log", tmp_path / "pid"
     bin_dir.mkdir()
 
@@ -96,8 +156,11 @@ def kill_check(tmp_path):
         e = _clean_env(SIMULATE=1, ROBOT_PORT=port, STREAM_PORT=sport, SAY_CMD="true")
         p = sp.Popen(cmd, cwd=ROBOT_DIR, env=e, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
         procs.append(p)
-        wait_http(f"http://127.0.0.1:{port if robot == 'counting' else sport}/" + ("" if robot == "counting" else "telemetry"))
-        time.sleep(0.6)
+        if robot == "counting":
+            wait_http(f"http://127.0.0.1:{port}/")
+            time.sleep(0.6)
+        else:
+            wait_robot_ready(f"http://127.0.0.1:{sport}")
         pidfile.write_text(str(p.pid))
         if robot == "latched":
             import httpx

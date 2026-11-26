@@ -91,11 +91,11 @@ bot or tbot setup; Postgres (`SELECT 1`) and Redis (`PING`, `protocol=2`) work t
 the dashboard connects to the robot over MCP, runs the agent loop and writes its activity feed to Redis through
 Teleport. `tsh mcp connect` and `tsh proxy mcp` work from a least-privilege beam against an MCP app served by a
 Teleport agent in Kubernetes, and the dashboard drives that robot through the tunnel. Claude Code inside the beam
-calls models once the beam has the `beam-user` role.
-On a read-only role, a beam that opened the robot's MCP app as plain HTTP with `tsh proxy app` still got the filtered tool
-list (`stop`, `get_telemetry`, `snapshot`), and Teleport answered a `drive` call with its own RBAC error ("RBAC is
-enforced by your Teleport roles ... access to resource denied"). `tests/live/check_mcp_bypass.sh` now checks the same
-path for the shipped role: a `picar-driver` beam must not be able to list or call `resume`. It reports `INCONCLUSIVE`,
+calls models once the beam has the `beam-user` role. Only the beam's creator could open its published app; another user
+needs the right to view the creator's beams plus a role matching Teleport's beam owner label (see
+`examples/picar-beambot/README.md`, "Who can open the published URL?").
+`tests/live/check_mcp_bypass.sh` checks that opening the robot's MCP app as plain HTTP with `tsh proxy app` doesn't
+skip the tool filter: a `picar-driver` beam must not be able to list or call `resume`. It reports `INCONCLUSIVE`,
 not a pass, when it can't see Teleport's denial, and it has not been run against a cluster with that role yet.
 
 ## Tests

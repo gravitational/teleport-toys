@@ -26,12 +26,16 @@ def server():
     env = {**os.environ, "SIMULATE": "1", "ROBOT_PORT": str(PORT), "STREAM_PORT": str(STREAM), "SAY_CMD": "true"}
     p = subprocess.Popen([sys.executable, os.path.join(HERE, "robot_mcp.py")], env=env,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(50):
+    # Wait for a real distance reading, not just an answer: the server is up a few ms before its control loop's first
+    # ultrasonic read, and until then a forward drive is refused (see wait_robot_ready in beambot/conftest.py).
+    for _ in range(200):
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{STREAM}/telemetry", timeout=1)
-            break
+            with urllib.request.urlopen(f"http://127.0.0.1:{STREAM}/telemetry", timeout=1) as r:
+                if json.load(r).get("ultrasonic_cm", -1) > 0:
+                    break
         except Exception:
-            time.sleep(0.2)
+            pass
+        time.sleep(0.05)
     else:
         p.kill()
         pytest.fail("simulated robot did not start")

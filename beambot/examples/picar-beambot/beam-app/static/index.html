@@ -292,7 +292,9 @@ metadata:
   name: picar-readonly
 spec:
   allow:
-    app_labels: {project: picar-beambot}
+    app_labels:
+      project: picar-beambot
+      teleport.internal/app-sub-kind: mcp
     mcp:
       tools: [snapshot, get_telemetry, stop]</pre>
                <div class="wide" style="margin-top:12px"><div class="k" style="font-size:11px;font-weight:700;color:var(--muted)">RECENT ROBOT CALLS (VIA TELEPORT)</div>

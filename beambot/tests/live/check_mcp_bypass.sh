@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Can a least-privilege beam reach the robot's MCP app as plain HTTP and skip the role's tool filter?
 #
-# Run INSIDE a beam created with a read-only role set, e.g.
+# Run INSIDE a beam created with the role you want to test, e.g.
 #   tsh beams add --roles beam-user,picar-driver
+# With the default FORBIDDEN=resume it reads get_telemetry first and only sends the real resume call while the robot
+# says halted=false, so a run never clears a STOP. (A STOP pressed in the few ms between the two calls could still
+# be cleared if the bypass is open: don't run it while someone may need the STOP.) A list that shows the tool is a
+# FAIL without calling it.
 # Usage: bash check_mcp_bypass.sh [mcp-app] [stream-app]      (defaults: picar-mcp picar-stream)
 # Env:   PORT (default 18443), FORBIDDEN (tool the role must not reach, default resume: the stop latch's key),
 #        EXPECT_TOOLS (tools the role DOES have, default drive,get_telemetry,snapshot,stop),
@@ -90,19 +94,40 @@ else
       pass "tools/list hides '$FORBIDDEN' and still shows the role's own tools"
     fi
 
-    CALL_ARGS="{}"; [ "$FORBIDDEN" = "drive" ] && CALL_ARGS="{\"speed\":0,\"seconds\":0.1,\"steer_deg\":0,\"wait\":false}"
-    rpc "$PORT" "${SID:--}" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"$FORBIDDEN\",\"arguments\":$CALL_ARGS}}"
-    echo "              tools/call $FORBIDDEN -> HTTP $RPC_CODE $(echo "$RPC_BODY" | head -c 220)"
-    ERRMSG="$(echo "$RPC_BODY" | jq -r '.error.message // empty' 2>/dev/null || true)"
-    if [ "$RPC_CODE" = "000" ]; then
-      inconclusive "no HTTP answer to the $FORBIDDEN call"
-    elif echo "$RPC_BODY" | jq -e '.result != null' >/dev/null 2>&1; then
-      fail "the $FORBIDDEN call REACHED THE ROBOT (a result came back, even if it was a refusal): Teleport did not stop it"
-    elif { [ -n "$ERRMSG" ] && echo "$ERRMSG $RPC_BODY" | grep -qE "$DENY_RE"; } \
-         || { [[ "$RPC_CODE" =~ ^(401|403)$ ]] && echo "$RPC_BODY" | grep -qiE "$DENY_RE|teleport"; }; then
-      pass "the $FORBIDDEN call was denied by Teleport RBAC"; PROVEN=1
+    # Never send a real `resume` while the robot is latched: if the bypass is open, the call would clear a STOP
+    # someone pressed. So read the latch first, and skip the call unless the robot plainly says halted=false.
+    # (If tools/list already showed the tool, the FAIL above is proven; don't call it at all.)
+    SKIP_CALL=""
+    if echo ",$NAMES," | grep -q ",$FORBIDDEN,"; then
+      SKIP_CALL="tools/list already showed '$FORBIDDEN'; not calling it"
+    elif [ "$FORBIDDEN" = "resume" ]; then
+      rpc "$PORT" "${SID:--}" '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_telemetry","arguments":{}}}'
+      HALTED="$(echo "$RPC_BODY" | jq -r '[.result.structuredContent.halted?, (.result.content[]? | select(.type=="text") | .text | fromjson? | .halted?)]
+                 | map(select(. != null)) | if length > 0 then (.[0] | tostring) else "unknown" end' 2>/dev/null || echo unknown)"
+      echo "              get_telemetry (HTTP $RPC_CODE) -> halted=${HALTED:-unknown}"
+      if [ "$HALTED" = "true" ]; then
+        SKIP_CALL="the robot is LATCHED (halted=true): a real resume call could clear that STOP, so it was not sent. Resume it from the dashboard and re-run, or pass FORBIDDEN=<another tool>"
+      elif [ "$HALTED" != "false" ]; then
+        SKIP_CALL="could not read the latch from get_telemetry (HTTP $RPC_CODE), so the resume call was not sent: it could clear a STOP"
+      fi
+    fi
+    if [ -n "$SKIP_CALL" ]; then
+      if echo ",$NAMES," | grep -q ",$FORBIDDEN,"; then note "$SKIP_CALL"; else inconclusive "$SKIP_CALL"; fi
     else
-      inconclusive "the $FORBIDDEN call failed, but not with a Teleport denial (HTTP $RPC_CODE): $(echo "$RPC_BODY" | head -c 160)"
+      CALL_ARGS="{}"; [ "$FORBIDDEN" = "drive" ] && CALL_ARGS="{\"speed\":0,\"seconds\":0.1,\"steer_deg\":0,\"wait\":false}"
+      rpc "$PORT" "${SID:--}" "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"$FORBIDDEN\",\"arguments\":$CALL_ARGS}}"
+      echo "              tools/call $FORBIDDEN -> HTTP $RPC_CODE $(echo "$RPC_BODY" | head -c 220)"
+      ERRMSG="$(echo "$RPC_BODY" | jq -r '.error.message // empty' 2>/dev/null || true)"
+      if [ "$RPC_CODE" = "000" ]; then
+        inconclusive "no HTTP answer to the $FORBIDDEN call"
+      elif echo "$RPC_BODY" | jq -e '.result != null' >/dev/null 2>&1; then
+        fail "the $FORBIDDEN call REACHED THE ROBOT (a result came back, even if it was a refusal): Teleport did not stop it"
+      elif { [ -n "$ERRMSG" ] && echo "$ERRMSG $RPC_BODY" | grep -qE "$DENY_RE"; } \
+           || { [[ "$RPC_CODE" =~ ^(401|403)$ ]] && echo "$RPC_BODY" | grep -qiE "$DENY_RE|teleport"; }; then
+        pass "the $FORBIDDEN call was denied by Teleport RBAC"; PROVEN=1
+      else
+        inconclusive "the $FORBIDDEN call failed, but not with a Teleport denial (HTTP $RPC_CODE): $(echo "$RPC_BODY" | head -c 160)"
+      fi
     fi
   fi
 fi
