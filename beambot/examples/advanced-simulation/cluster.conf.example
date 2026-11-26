@@ -1,0 +1,8 @@
+# hostname  ip              role
+# hostname = your ~/.ssh/config alias for the Pi; ip = its LAN address (used for the e-stop peer list).
+# Replace the example addresses (documentation range) with your own.
+pi1         192.0.2.11      safety
+pi2         192.0.2.12      vision
+pi3         192.0.2.13      drive
+pi4         192.0.2.14      arm
+pi5         192.0.2.15      sensors

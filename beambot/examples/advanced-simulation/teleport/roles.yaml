@@ -1,0 +1,65 @@
+# tctl create -f teleport/roles.yaml
+#
+# Tool-name prefixes on the Pis map 1:1 to these roles:
+#   sense_*  -> observer     act_* -> operator     admin_* -> admin     safety_* -> everyone
+#
+# NOTE: no `deny` rules on purpose. Teleport deny rules are greedy and apply to
+# the whole identity, so a deny on observer would also block an operator grant
+# obtained via access request.
+kind: role
+version: v8
+metadata:
+  name: beambot-sim-observer
+  description: See and sense BeamBot. Can always hit the e-stop. Cannot move it.
+spec:
+  allow:
+    app_labels:
+      robot: beambot-sim
+      teleport.internal/app-sub-kind: mcp
+    mcp:
+      tools:
+        - "sense_*"
+        - "safety_*"
+    # The agent (or its human) must ask before it gets hands.
+    request:
+      roles: [beambot-sim-operator]
+      reason:
+        mode: required
+  options:
+    max_session_ttl: 8h
+---
+kind: role
+version: v8
+metadata:
+  name: beambot-sim-operator
+  description: Move BeamBot (drive + arm), time-boxed by access request.
+spec:
+  allow:
+    app_labels:
+      robot: beambot-sim
+      teleport.internal/app-sub-kind: mcp
+    mcp:
+      tools:
+        - "sense_*"
+        - "safety_*"
+        - "act_*"
+  options:
+    max_session_ttl: 1h
+---
+kind: role
+version: v8
+metadata:
+  name: beambot-sim-admin
+  description: Humans only. Reset e-stop, SSH to nodes, approve operator requests.
+spec:
+  allow:
+    app_labels:
+      robot: beambot-sim
+      teleport.internal/app-sub-kind: mcp
+    mcp:
+      tools: ["*"]
+    node_labels:
+      robot: beambot-sim
+    logins: [alarm]
+    review_requests:
+      roles: [beambot-sim-operator]

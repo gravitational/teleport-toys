@@ -1,0 +1,34 @@
+# BeamBot robot server on a PiCar-X driven by robot_hat_lite.py (no SunFounder libraries), e.g. Arch Linux ARM.
+#   install -D -m644 robot_mcp.py robot_hat_lite.py motor_test.py -t /opt/picar-beambot/
+#   python3 -m venv --system-site-packages /opt/picar-beambot/venv && /opt/picar-beambot/venv/bin/pip install "mcp>=1.9,<2" uvicorn
+#   cp picar-robot-hat.service /etc/systemd/system/picar-robot.service && systemctl enable --now picar-robot
+# The robot user needs groups robohw (i2c, gpiochip), video (camera, /dev/dma_heap; see README) and audio (speaker:
+# pacman -S espeak-ng alsa-utils; override the voice with Environment=SAY_CMD=...).
+[Unit]
+Description=BeamBot PiCar-X MCP + stream server (robot_hat_lite)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=robot
+Group=robot
+SupplementaryGroups=robohw video audio
+WorkingDirectory=/opt/picar-beambot
+ExecStart=/opt/picar-beambot/venv/bin/python /opt/picar-beambot/robot_mcp.py
+Restart=on-failure
+# The emergency-stop latch is saved under $STATE_DIRECTORY (/var/lib/picar-beambot), so a restart after a crash
+# comes back still latched. A human clears it with Resume.
+StateDirectory=picar-beambot
+RestartSec=2
+# However the server ends (crash, SIGKILL, OOM), the HAT would keep its last PWM duty: zero the motors afterwards.
+ExecStopPost=-/opt/picar-beambot/venv/bin/python /opt/picar-beambot/robot_hat_lite.py stop
+Environment=HW=hat
+Environment=MAX_SPEED=40
+Environment=OBSTACLE_STOP_CM=20
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

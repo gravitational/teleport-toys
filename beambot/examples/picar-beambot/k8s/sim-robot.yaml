@@ -1,0 +1,59 @@
+# A simulated PiCar-X that is always on, inside your cluster. Reached only through Teleport (see deploy.sh).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: picar-sim
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: picar-sim
+  namespace: picar-sim
+spec:
+  replicas: 1            # one robot: it has a position, a heading and a camera, so don't scale it out
+  selector:
+    matchLabels: {app: picar-sim}
+  template:
+    metadata:
+      labels: {app: picar-sim}
+    spec:
+      containers:
+        - name: robot
+          image: picar-sim:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: mcp, containerPort: 8765}      # /mcp only
+            - {name: stream, containerPort: 8766}   # video, telemetry, stop: no /mcp
+          env:
+            # The emergency-stop latch is saved here, so a restarted container comes back still latched.
+            # An emptyDir survives container restarts, not a replaced pod: a new pod starts unlatched.
+            - {name: HALT_FILE, value: /var/lib/picar-beambot/halted}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/picar-beambot}
+          readinessProbe:
+            httpGet: {path: /telemetry, port: stream}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /telemetry, port: stream}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      volumes:
+        - {name: state, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: picar-sim
+  namespace: picar-sim
+spec:
+  selector: {app: picar-sim}
+  ports:
+    - {name: mcp, port: 8765, targetPort: mcp}
+    - {name: stream, port: 8766, targetPort: stream}

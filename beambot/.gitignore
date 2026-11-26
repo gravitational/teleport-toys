@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.db
+.DS_Store
+.fuse_hidden*
+cluster.conf
+logs/
+mcp.json
+.mcp.json
+.env
