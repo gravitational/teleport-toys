@@ -41,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from mcp.server.fastmcp import FastMCP, Image
 from starlette.applications import Starlette
@@ -538,6 +539,15 @@ robot = Robot()
 # =============================================================================
 mcp = FastMCP("picar-beambot", host=HOST, port=PORT, stateless_http=True)
 
+# STOP gets its own threads. drive(wait=True), look and say each hold a thread of asyncio's default pool (CPUs + 4,
+# so 8 on a 4-core Pi) for seconds, and a STOP queued behind them would leave the car moving.
+_stop_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="estop")
+
+
+async def emergency_stop_now():
+    """robot.emergency_stop() off the server's thread (it may wait up to HALT_SAVE_WAIT_S) and off the shared pool."""
+    return await asyncio.get_running_loop().run_in_executor(_stop_pool, robot.emergency_stop)
+
 
 @mcp.tool()
 async def drive(speed: int, seconds: float, steer_deg: int = 0, wait: bool = True) -> str:
@@ -557,7 +567,7 @@ async def look(pan_deg: int = 0, tilt_deg: int = 0) -> str:
 async def stop() -> str:
     """Emergency stop: stop all motion now and refuse `drive` until a human resumes. `drive` already ends by
     itself, so only call this to abort a move, not to finish one."""
-    return await asyncio.to_thread(robot.emergency_stop) + " (latched: drive is refused until resumed)"
+    return await emergency_stop_now() + " (latched: drive is refused until resumed)"
 
 
 @mcp.tool()
@@ -615,7 +625,7 @@ async def video_route(request: Request):
 
 async def stop_route(request: Request):
     try:
-        return JSONResponse({"result": await asyncio.to_thread(robot.emergency_stop), "halted": True})
+        return JSONResponse({"result": await emergency_stop_now(), "halted": True})
     except StopFailed as e:   # still latched, but say so: the car may be moving
         return JSONResponse({"ok": False, "halted": True, "error": str(e)}, status_code=500)
 

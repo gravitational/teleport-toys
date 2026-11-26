@@ -1025,7 +1025,7 @@ def test_stop_does_not_wait_for_the_disk(rm, monkeypatch, tmp_path):
     assert time.time() - t1 < 0.3
     th.join(5)
     assert time.time() - t0 < 1.0, "the stop's answer waited for the disk"
-    while not (tmp_path / "halted").exists() and time.time() - t0 < 5:
+    while not r.halt_saved and time.time() - t0 < 5:   # set after the write and fsync; the file appears before that
         time.sleep(0.05)
     assert (tmp_path / "halted").exists() and time.time() - t0 >= 2.0 and r.halt_saved
 

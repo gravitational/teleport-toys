@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import httpx
@@ -151,7 +152,7 @@ def test_a_resume_during_a_stalled_stop_write_stays_consistent(rm, monkeypatch, 
     assert r.halted is False and not f.exists() and r.halt_saved is False
     r.emergency_stop()                                 # pressed again: it must be written again
     t0 = time.time()
-    while not f.exists() and time.time() - t0 < 5:
+    while not r.halt_saved and time.time() - t0 < 5:   # set after the write and fsync; the file appears before that
         time.sleep(0.05)
     assert f.exists() and r.halted and r.halt_saved
 
@@ -275,3 +276,30 @@ def test_repeated_stops_with_mcp_hung_do_not_pile_up(monkeypatch):
         hung.close()
     assert peak <= beam_app.MAX_MCP_STOPS_IN_FLIGHT, f"{peak} MCP stops were left running at once"
     assert after == 0, f"{after} MCP stops still running after their timeout"
+
+
+# --------------------------------------------------------------------------- STOP never queues behind other robot calls
+def test_mcp_stop_does_not_wait_for_a_busy_thread_pool(rm, monkeypatch):
+    """drive(wait=True), look and say each hold a thread of asyncio's default pool for seconds (8 threads on a
+    4-core Pi). The MCP `stop` used to queue behind them while the car kept moving."""
+    r = new_robot(rm)
+    monkeypatch.setattr(rm, "robot", r)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+        release = threading.Event()
+        busy = [loop.run_in_executor(None, release.wait, 10) for _ in range(2)]   # every default thread is taken
+        try:
+            r.drive(-20, 3, 0, wait=False)
+            assert r.car.speed == -20
+            t0 = time.time()
+            out = await asyncio.wait_for(rm.stop(), 2)
+            return out, time.time() - t0
+        finally:
+            release.set()
+            await asyncio.gather(*busy)
+
+    out, took = asyncio.run(scenario())
+    assert out.startswith("stopped") and took < 1.0, (out, took)
+    assert r.car.speed == 0 and r.halted
