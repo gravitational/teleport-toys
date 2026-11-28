@@ -144,12 +144,19 @@ def kill_check(tmp_path):
         f.chmod(f.stat().st_mode | stat.S_IEXEC)
     script("id", "echo 0\n")
     script("journalctl", "echo fake journal\n")
-    script("systemctl", f'echo "$@" >> {log}\ncase "$1" in is-active) exit 0;; '
-                        f'show) echo "ExecStopPost={{ path=/x ; status=0/SUCCESS }}";; '
-                        f'kill) kill -9 "$(cat {pidfile})";; esac\nexit 0\n')
+    # is-active says whether the robot process is really alive (a zombie counts as dead). kill notes whether the robot
+    # was still driving at that moment; FAKE_KILL=noop makes it do nothing. FAKE_ENV is the unit's Environment= line.
+    moving = "import json,sys,urllib.request; print('moving_at_kill=%s' % json.load(urllib.request.urlopen(sys.argv[1], timeout=5))['moving'])"
+    script("systemctl", f'echo "$@" >> {log}\ncase "$1" in '
+                        f'is-active) case "$(ps -o stat= -p "$(cat {pidfile})" 2>/dev/null)" in ""|Z*) s=failed;; *) s=active;; esac; '
+                        f'[ "$2" = --quiet ] || echo "$s"; [ "$s" = active ]; exit $?;; '
+                        f'show) case "$*" in *Environment*) echo "Environment=$FAKE_ENV";; '
+                        f'*) echo "ExecStopPost={{ path=/x ; status=0/SUCCESS }}";; esac;; '
+                        f'kill) "$PY" -c "{moving}" "$FAKE_TELEMETRY" >> {log}; '
+                        f'[ "$FAKE_KILL" = noop ] || kill -9 "$(cat {pidfile})";; esac\nexit 0\n')
     procs = []
 
-    def run(robot=None, answers="\ny\n", **env):
+    def run(robot=None, answers="\ny\ny\n", **env):
         port, sport = free_port(), free_port()
         srv = ROOT / "tests/helpers/counting_robot.py" if robot == "counting" else ROBOT_DIR / "robot_mcp.py"
         cmd = [sys.executable, str(srv)] + ([str(port), str(tmp_path / "calls.txt")] if robot == "counting" else [])
@@ -166,10 +173,15 @@ def kill_check(tmp_path):
             import httpx
             httpx.post(f"http://127.0.0.1:{sport}/stop")
         log.write_text("")
-        r = sp.run(["bash", str(KILL_SCRIPT), *env.pop("args", ["kill"])], input=answers, capture_output=True, text=True, timeout=60,
-                   env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "URL": f"http://127.0.0.1:{port}/mcp",
-                        "PY": sys.executable, "STOP_CMD": env.pop("STOP_CMD", "true"), "DROPIN_ROOT": str(tmp_path / "dropins"),
-                        "SETTLE_S": "0.2", **env})
+        cmd = ["bash", str(KILL_SCRIPT), *env.pop("args", ["kill"])]
+        senv = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "URL": f"http://127.0.0.1:{port}/mcp",
+                "PY": sys.executable, "STOP_CMD": env.pop("STOP_CMD", "true"), "DROPIN_ROOT": str(tmp_path / "dropins"),
+                "SETTLE_S": "0.2", "FAKE_TELEMETRY": f"http://127.0.0.1:{sport}/telemetry", **env}
+        if callable(answers):        # an operator who takes their time: answers(proc) talks to the script, returns its output
+            proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.STDOUT, env=senv)
+            out = answers(proc)
+            return proc.wait(60), out, log.read_text()
+        r = sp.run(cmd, input=answers, capture_output=True, text=True, timeout=60, env=senv)
         return r.returncode, r.stdout + r.stderr, log.read_text()
     yield run
     for p in procs:
@@ -200,7 +212,7 @@ def test_a_motor_stop_that_fails_at_the_end_says_so(kill_check):
 
 
 def test_the_control_run_expects_the_wheels_to_keep_turning(kill_check):
-    rc, out, _ = kill_check(args=["control"], answers="\nn\n")
+    rc, out, _ = kill_check(args=["control"], answers="\ny\nn\n")
     assert rc == 0 and "control behaved as expected" in out, out
 
 

@@ -185,10 +185,11 @@ because the app never gives it `resume`). Resume works through the stream app (`
 - **The latch survives a restart.** It is saved to `$STATE_DIRECTORY/halted` (the systemd unit sets
   `StateDirectory=picar-beambot`), so a server that crashed after STOP and was restarted by systemd is still latched.
   The simulator keeps it in memory unless you set `HALT_FILE`; the Kubernetes example saves it on an `emptyDir`, which
-  survives a container restart but not a replaced pod. `HALT_FILE=` (empty) turns it off. A slow SD card never delays
-  a STOP: the motors stop and the robot answers within `HALT_SAVE_WAIT_S` (0.3 s) even if the file isn't written yet,
+  survives a container restart but not a replaced pod. `HALT_FILE=` (empty) turns it off (`latch_saved` then stays
+  false). A slow SD card never delays a STOP: the motors stop and the robot answers within `HALT_SAVE_WAIT_S` (0.3 s) even if the file isn't written yet,
   saying "the latch is still being saved to disk" (until then a restart would clear it). Telemetry shows
-  `latch_saved` once it is on disk. Video and telemetry keep flowing during the write.
+  `latch_saved` once it is on disk, and `latch_error` if saving it failed; the next STOP's answer repeats that error.
+  Video and telemetry keep flowing during the write.
 - **STOP always answers.** The dashboard sends both stops at once and gives up on the stream app after
   `STREAM_STOP_TIMEOUT_S` (2 s) and on the MCP stop after `MCP_STOP_TIMEOUT_S` (5 s). If neither got through, the
   page shows STOP FAILED, so you know to cut the power.
@@ -311,9 +312,11 @@ The Data panel follows the selected task. Add your own by adding one entry to `T
 
 `robot/check_stop_on_kill.sh` runs **on the Pi, as root, car on blocks**. It drives, kills the server with SIGKILL
 (or SIGTERM), and asks whether the wheels stopped, so you see `ExecStopPost` work on real hardware. It drives in reverse,
-confirms from telemetry that the car really moved before it kills anything, and refuses to run (`INVALID`) if the car is
-still latched from an earlier STOP, so a "y" can never pass a test that did not happen. It picks the `robot_hat_lite`
-paths if they exist and the SunFounder `picarx` library otherwise, and warns loudly if it cannot zero the motors at the end. The `control`
+checks from telemetry that the server accepted the drive, asks you whether the wheels are turning before it kills anything
+(it keeps re-sending the 3 s drive while you look), checks that the unit really died, and refuses to run (`INVALID`) if
+the car is still latched from an earlier STOP, so a "y" can never pass a test that did not happen. It picks the
+`robot_hat_lite` paths if the unit sets `HW=hat` and the SunFounder `picarx` library otherwise, and warns loudly if it
+cannot zero the motors at the end. The `control`
 mode disables `ExecStopPost` first: the wheels should keep turning, which proves the check can fail.
 
 **Status: not yet run on hardware.** The units run `ExecStopPost` (zero the motors) after any exit, and systemd
