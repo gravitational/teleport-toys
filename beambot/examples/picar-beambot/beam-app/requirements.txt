@@ -2,6 +2,6 @@ fastapi
 uvicorn[standard]
 httpx
 anthropic
-mcp>=1.9,<2   # code uses the 1.x API (FastMCP, streamablehttp_client)
+mcp>=1.11,<2   # code uses the 1.x API (FastMCP, streamablehttp_client)
 psycopg[binary]   # Postgres (beambot-postgres via tsh proxy db)
 redis             # Redis (beambot-redis via tsh proxy db), optional at runtime

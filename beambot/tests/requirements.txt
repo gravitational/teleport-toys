@@ -1,4 +1,4 @@
-mcp>=1.9,<2
+mcp>=1.11,<2
 uvicorn
 pillow
 fastapi

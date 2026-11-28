@@ -8,7 +8,10 @@ Afterwards `picar-mcp` and `picar-stream` show up in Teleport like the real thin
  beam ──tsh──▶ Teleport proxy ◀──outbound only── Teleport agent (pod) ──▶ picar-sim (pod, :8765 MCP, :8766 stream)
 ```
 
-Nothing listens on the internet: the agent connects out, and the robot is a ClusterIP Service.
+Nothing listens on the internet: the agent connects out, and the robot is a ClusterIP Service. The robot's `/mcp` has no
+tool filter of its own, so a NetworkPolicy in `sim-robot.yaml` lets only pods in the agent's `teleport-agent` namespace
+reach it. Your cluster's network plugin has to enforce NetworkPolicy (k3s does; minikube needs e.g. `--cni=calico`):
+without that, any pod in the cluster can call `/mcp` and skip Teleport's tool filter.
 
 ## Run it
 

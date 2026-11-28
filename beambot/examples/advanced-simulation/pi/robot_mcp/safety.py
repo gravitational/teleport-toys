@@ -5,6 +5,10 @@
   e-stop on every node via UDP broadcast. The packet can only STOP the robot,
   never move it, so it is deliberately unauthenticated and works even if the
   internet / Teleport / the Beam is down.
+* Heartbeat: the safety node says "alive" on the same port every ESTOP_HEARTBEAT_MS. Every other node refuses
+  act_* when it has not heard one for ESTOP_HEARTBEAT_TIMEOUT_MS, so a dead or cut-off safety node (and its
+  button) stops the robot instead of going unnoticed. Also unauthenticated: it is a liveness check, not access
+  control (Teleport decides who may move the robot).
 * Watchdog helper: timed motions always auto-stop.
 """
 import logging
@@ -17,11 +21,18 @@ log = logging.getLogger("safety")
 
 ESTOP_PORT = int(os.environ.get("ESTOP_PORT", "47474"))
 ESTOP_MAGIC = b"BEAMBOT-ESTOP"
+HEARTBEAT_MAGIC = b"BEAMBOT-ALIVE"
+ROBOT_NAME = os.environ.get("ROBOT_NAME", "beambot-sim")
+HEARTBEAT = HEARTBEAT_MAGIC + b"|" + ROBOT_NAME.encode()[:100]  # named: another robot's safety node doesn't count
+HEARTBEAT_MS = int(os.environ.get("ESTOP_HEARTBEAT_MS", "500"))                   # how often the safety node beats
+HEARTBEAT_TIMEOUT_MS = int(os.environ.get("ESTOP_HEARTBEAT_TIMEOUT_MS", "3000"))  # silence after which others stop
 MAX_MOTION_MS = int(os.environ.get("MAX_MOTION_MS", "2000"))
 
 _lock = threading.Lock()
 _state = {"estopped": False, "reason": None, "since": None, "source": None}
 _stop_hooks = []
+_listener = {"up": False}  # True only while the e-stop listener is bound and its thread alive
+_heartbeat = {"required": True, "last": None}  # last: monotonic time of the last heartbeat heard
 
 
 def register_stop_hook(fn):
@@ -59,14 +70,38 @@ def state():
         return dict(_state)
 
 
+def listener_up():
+    return _listener["up"]
+
+
+def heartbeat_ok():
+    """True on the safety node (it sends the heartbeat) and on a node that heard it within HEARTBEAT_TIMEOUT_MS."""
+    last = _heartbeat["last"]
+    return not _heartbeat["required"] or (last is not None
+                                          and time.monotonic() - last <= HEARTBEAT_TIMEOUT_MS / 1000.0)
+
+
 def require_armed():
     from .registry import ToolError
 
+    if not _listener["up"]:
+        raise ToolError(
+            f"The e-stop listener (udp/{ESTOP_PORT}) is not running on this node, so a STOP from another node "
+            "would not reach it. Actuation refused. Check this node's log."
+        )
     s = state()
     if s["estopped"]:
         raise ToolError(
             f"E-STOP is latched ({s['reason']!r} from {s['source']}). "
             "Actuation refused. A human must call admin_reset_estop."
+        )
+    if not heartbeat_ok():
+        last = _heartbeat["last"]
+        quiet = "none heard yet" if last is None else f"silent for {time.monotonic() - last:.1f} s"
+        raise ToolError(
+            f"No heartbeat from the safety node on udp/{ESTOP_PORT} ({quiet}; limit {HEARTBEAT_TIMEOUT_MS} ms). "
+            "It may be down or cut off, and then its e-stop button can't reach this node. "
+            "Actuation refused until it is heard again."
         )
 
 
@@ -107,25 +142,59 @@ def start_listener():
             log.error("cannot bind e-stop listener on %d: %s", ESTOP_PORT, e)
             return
         log.info("e-stop listener on udp/%d", ESTOP_PORT)
-        while True:
-            data, addr = s.recvfrom(512)
-            if data.startswith(ESTOP_MAGIC):
-                reason = data[len(ESTOP_MAGIC) + 1 :].decode(errors="replace") or "remote"
-                trip(reason, source=f"lan:{addr[0]}", broadcast=False)
+        _listener["up"] = True
+        try:
+            while True:
+                data, addr = s.recvfrom(512)
+                if data.startswith(ESTOP_MAGIC):
+                    reason = data[len(ESTOP_MAGIC) + 1 :].decode(errors="replace") or "remote"
+                    trip(reason, source=f"lan:{addr[0]}", broadcast=False)
+                elif data == HEARTBEAT:
+                    _heartbeat["last"] = time.monotonic()
+        finally:
+            _listener["up"] = False
 
     threading.Thread(target=loop, name="estop-listener", daemon=True).start()
 
 
+def start_heartbeat():
+    """Run on the safety node: tell every node, every HEARTBEAT_MS, that the safety node is alive."""
+    _heartbeat["required"] = False  # this node is the source
+
+    def loop():
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        failing = set()
+        while True:
+            for addr in _targets():
+                try:
+                    s.sendto(HEARTBEAT, (addr, ESTOP_PORT))
+                    failing.discard(addr)
+                except OSError as e:
+                    if addr not in failing:  # once per outage, not twice a second
+                        log.error("heartbeat to %s failed: %s", addr, e)
+                        failing.add(addr)
+            time.sleep(HEARTBEAT_MS / 1000.0)
+
+    threading.Thread(target=loop, name="estop-heartbeat", daemon=True).start()
+    log.info("heartbeat to %s every %d ms", ", ".join(_targets()), HEARTBEAT_MS)
+
+
 def timed(duration_ms, start_fn, stop_fn):
-    """Run start_fn now and stop_fn after duration_ms (clamped). Blocks until done."""
+    """Run start_fn now and stop_fn after duration_ms (clamped). Blocks until done.
+
+    Returns the ms the motion really ran: less than asked when an e-stop cut it short."""
     duration_ms = max(0, min(int(duration_ms), MAX_MOTION_MS))
+    ran_ms = duration_ms
     try:
         # start_fn is inside the try: if it fails half way (the first motor written, the second not), stop_fn
         # still runs and de-energizes whatever did start.
         start_fn()
-        deadline = time.monotonic() + duration_ms / 1000.0
+        started = time.monotonic()
+        deadline = started + duration_ms / 1000.0
         while time.monotonic() < deadline:
             if state()["estopped"]:
+                ran_ms = int((time.monotonic() - started) * 1000)
                 break
             time.sleep(0.02)
     finally:
@@ -135,4 +204,4 @@ def timed(duration_ms, start_fn, stop_fn):
             log.exception("stop_fn failed, retrying")
             time.sleep(0.05)
             stop_fn()
-    return duration_ms
+    return ran_ms

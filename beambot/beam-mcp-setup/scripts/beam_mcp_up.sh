@@ -32,6 +32,9 @@ if [[ -n "$VER" && "$(printf '%s\n18.11.9\n' "$VER" | sort -V | head -1)" != "18
   echo "WARN: tsh $VER is older than 18.11.9, the minimum the Beams docs list." >&2
 fi
 
+if [[ -n "$BEAM" && -n "${ROLES//[[:space:]]/}" ]]; then
+  echo "WARN: --roles is ignored with --beam: beam $BEAM keeps the roles it was created with (see: tsh beams exec $BEAM tsh status)" >&2
+fi
 if [[ -z "$BEAM" ]]; then
   # A blank list counts as "not given" (never `--roles=" "`: tsh may then give the beam all your roles).
   ROLES="${ROLES//[[:space:]]/}"

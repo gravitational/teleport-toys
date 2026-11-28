@@ -253,8 +253,8 @@ class AutoMapper:
             return False
         self.on_view = on_view
         self.speed = max(15, min(40, int(speed or SPEED)))
-        self.max_moves = max(10, int(max_moves or MAX_MOVES))
-        self.max_minutes = max(1.0, float(max_minutes or MAX_MINUTES))
+        self.max_moves = max(10, min(2000, int(max_moves or MAX_MOVES)))     # finite whatever is asked for
+        self.max_minutes = max(1.0, min(60.0, float(max_minutes or MAX_MINUTES)))
         self.no_motion = self.slips = 0
         self.status = {"state": "starting", "moves": 0, "scans": 1, "started": time.time(), "log": [],
                        "speed": self.speed, "max_moves": self.max_moves, "max_minutes": self.max_minutes}

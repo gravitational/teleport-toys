@@ -85,7 +85,8 @@ class StopFailed(RuntimeError):
 # sensor) is "unknown", not "clear". Set ALLOW_BLIND_FORWARD=1 only if you accept driving without the sensor.
 SENSOR_MAX_AGE_S = float(os.environ.get("SENSOR_MAX_AGE_S", "0.5"))
 ALLOW_BLIND_FORWARD = os.environ.get("ALLOW_BLIND_FORWARD") == "1"
-# Speaker: text is appended as the last argument. espeak-ng plays straight to ALSA (the Robot HAT speaker).
+# Speaker: text is appended as the last argument, after "--" so text starting with "-" is never read as an option.
+# espeak-ng plays straight to ALSA (the Robot HAT speaker).
 SAY_CMD = os.environ.get("SAY_CMD", "espeak-ng -a 200 -s 150 -v en")
 
 # ---- Dead-reckoning calibration (PiCar-X has no wheel encoders: CALIBRATE THESE) ----
@@ -418,7 +419,8 @@ class Robot:
         return ""
 
     def _latch_writer(self):
-        """Saves the latch to disk whenever a STOP asks, unless it is already saved or a Resume got in first."""
+        """Saves the latch to disk whenever a STOP asks, unless it is already saved or a Resume got in first. It must never
+        die: every later STOP waits on it."""
         while True:
             with self.save_cv:
                 self.save_cv.wait_for(lambda: self.save_req != self.save_done)
@@ -426,8 +428,11 @@ class Robot:
             err = ""
             with self.halt_io:
                 if self.halted and not self.halt_saved:
-                    err = self._save_halt(True)
-                    self.halt_saved = not err
+                    try:
+                        err = self._save_halt(True)
+                    except Exception as e:  # noqa: BLE001  _save_halt catches only OSError: report anything else too
+                        err = f"{type(e).__name__}: {e}"
+                    self.halt_saved = bool(HALT_FILE) and not err   # no file: nothing would survive a restart
             with self.save_cv:
                 self.save_done, self.save_err = req, err
                 self.save_cv.notify_all()
@@ -451,13 +456,14 @@ class Robot:
             req = self.save_req
             self.save_cv.notify_all()
             written = self.save_cv.wait_for(lambda: self.save_done >= req, timeout=HALT_SAVE_WAIT_S)
-            not_saved = self.save_err if written else ""
+            save_err = self.save_err   # this STOP's save if it finished, else the last one (a save that failed slowly)
         if stop_error is not None:
             raise StopFailed(self.last_event) from stop_error
         if not written:
-            return "stopped (the latch is still being saved to disk: until it is, a restart would clear it)"
-        return "stopped" + (f" (WARNING: the latch could not be saved, a restart would clear it: {not_saved})"
-                            if not_saved else "")
+            return ("stopped (the latch is still being saved to disk: until it is, a restart would clear it"
+                    + (f"; the last attempt failed: {save_err}" if save_err else "") + ")")
+        return "stopped" + (f" (WARNING: the latch could not be saved, a restart would clear it: {save_err})"
+                            if save_err else "")
 
     def release(self):
         """A plain stop that does not latch: letting go of the drive pad, the end of an auto-map run."""
@@ -500,7 +506,7 @@ class Robot:
         except Exception as e:  # noqa: BLE001
             self.last_event = f"speaker enable failed: {e}"
         try:
-            r = subprocess.run([*shlex.split(SAY_CMD), text], capture_output=True, text=True, timeout=20)
+            r = subprocess.run([*shlex.split(SAY_CMD), "--", text], capture_output=True, text=True, timeout=20)
         finally:
             try:
                 amp(False)
@@ -523,6 +529,7 @@ class Robot:
                 "moving": self.speed != 0,
                 "halted": self.halted,
                 "latch_saved": self.halt_saved,   # the latch is on disk, so it survives a restart
+                "latch_error": self.save_err if self.halted and not self.halt_saved else "",   # why the last save failed
                 "speed": self.speed,
                 "steer": self.steer,
                 "last_event": self.last_event,

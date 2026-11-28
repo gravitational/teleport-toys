@@ -1,6 +1,7 @@
 """check_mcp_bypass.sh must only say PASS when Teleport visibly denied the call. Every other outcome is a FAIL
 (the call got through) or INCONCLUSIVE (nothing was proven): the false-PASS cases the review found."""
 import os
+import socket
 import stat
 import subprocess
 import sys
@@ -10,6 +11,20 @@ import pytest
 from conftest import ROOT, HELPERS, free_port
 
 SCRIPT = ROOT / "tests/live/check_mcp_bypass.sh"
+
+
+def free_port_pair():
+    """A free port whose next one is free too: the check proxies the stream app on PORT+1. A plain free_port() is in
+    the ephemeral range, where PORT+1 is often some client's socket, and the fake tsh then fails to bind it."""
+    for _ in range(50):
+        p = free_port()
+        try:
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", p + 1))
+            return p
+        except OSError:
+            continue
+    raise RuntimeError("no two free ports in a row")
 
 
 @pytest.fixture
@@ -22,8 +37,8 @@ def run_check(tmp_path):
 
     def run(mode, *args, **env):
         e = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "FAKE_MODE": mode,
-             "PORT": str(free_port()), **{k: str(v) for k, v in env.items()}}
-        p = subprocess.run(["bash", str(SCRIPT), *args], env=e, capture_output=True, text=True, timeout=60)
+             "PORT": str(free_port_pair()), **{k: str(v) for k, v in env.items()}}
+        p = subprocess.run(["bash", str(SCRIPT), *args], env=e, capture_output=True, text=True, timeout=60, cwd=tmp_path)
         return p.returncode, p.stdout + p.stderr
     return run
 
@@ -66,22 +81,9 @@ def test_a_skipped_stream_check_is_said_out_loud_and_can_be_required(run_check):
 
 
 # --------------------------------------------------------------------------- the check must never clear a STOP
+# (its one call can't run a tool: see test_followups_scripts.py::test_the_probe_call_can_never_run_the_tool)
 def _calls(path):
-    return path.read_text().split() if path.exists() else []
-
-
-def test_a_latched_robot_is_never_sent_resume(run_check, tmp_path):
-    calls = tmp_path / "calls.txt"
-    rc, out = run_check("leaky_call", FAKE_HALTED=1, FAKE_CALLS=calls)
-    assert rc == 2 and "RESULT: INCONCLUSIVE" in out and "LATCHED" in out, out
-    assert "resume" not in _calls(calls), "the check sent resume to a latched robot"
-
-
-def test_an_unreadable_latch_is_never_sent_resume(run_check, tmp_path):
-    calls = tmp_path / "calls.txt"
-    rc, out = run_check("leaky_call", FAKE_HALTED="missing", FAKE_CALLS=calls)
-    assert rc == 2 and "RESULT: INCONCLUSIVE" in out and "could not read the latch" in out, out
-    assert "resume" not in _calls(calls)
+    return [line.split("\t")[0] for line in path.read_text().splitlines()] if path.exists() else []
 
 
 def test_a_list_that_shows_resume_fails_without_calling_it(run_check, tmp_path):
@@ -114,7 +116,7 @@ def test_the_reviewers_bypass_against_a_latched_simulator_keeps_the_stop(run_che
     assert sim.halted() is True
     rc, out = run_check(mode, FAKE_UPSTREAM=sim.mcp, FAKE_STREAM="missing")
     assert "RESULT: PASS" not in out, out
-    assert rc == (1 if mode == "forward" else 2), out
+    assert rc == 1, out
     assert sim.halted() is True, "running the check cleared the STOP:\n" + out
 
 
@@ -122,7 +124,7 @@ def test_an_unlatched_simulator_behind_a_list_only_filter_fails(run_check, sim):
     """The gate still lets the check prove the bypass when nobody has pressed STOP."""
     assert sim.halted() is False
     rc, out = run_check("forward_hide", FAKE_UPSTREAM=sim.mcp, FAKE_STREAM="missing")
-    assert rc == 1 and "halted=false" in out and "REACHED THE ROBOT" in out, out
+    assert rc == 1 and "REACHED THE ROBOT" in out, out
 
 
 # --------------------------------------------------------------------------- robot/check_stop_on_kill.sh
@@ -144,12 +146,19 @@ def kill_check(tmp_path):
         f.chmod(f.stat().st_mode | stat.S_IEXEC)
     script("id", "echo 0\n")
     script("journalctl", "echo fake journal\n")
-    script("systemctl", f'echo "$@" >> {log}\ncase "$1" in is-active) exit 0;; '
-                        f'show) echo "ExecStopPost={{ path=/x ; status=0/SUCCESS }}";; '
-                        f'kill) kill -9 "$(cat {pidfile})";; esac\nexit 0\n')
+    # is-active says whether the robot process is really alive (a zombie counts as dead). kill notes whether the robot
+    # was still driving at that moment; FAKE_KILL=noop makes it do nothing. FAKE_ENV is the unit's Environment= line.
+    moving = "import json,sys,urllib.request; print('moving_at_kill=%s' % json.load(urllib.request.urlopen(sys.argv[1], timeout=5))['moving'])"
+    script("systemctl", f'echo "$@" >> {log}\ncase "$1" in '
+                        f'is-active) case "$(ps -o stat= -p "$(cat {pidfile})" 2>/dev/null)" in ""|Z*) s=failed;; *) s=active;; esac; '
+                        f'[ "$2" = --quiet ] || echo "$s"; [ "$s" = active ]; exit $?;; '
+                        f'show) case "$*" in *Environment*) echo "Environment=$FAKE_ENV";; '
+                        f'*) echo "ExecStopPost={{ path=/x ; status=0/SUCCESS }}";; esac;; '
+                        f'kill) "$PY" -c "{moving}" "$FAKE_TELEMETRY" >> {log}; '
+                        f'[ "$FAKE_KILL" = noop ] || kill -9 "$(cat {pidfile})";; esac\nexit 0\n')
     procs = []
 
-    def run(robot=None, answers="\ny\n", **env):
+    def run(robot=None, answers="\ny\ny\n", **env):
         port, sport = free_port(), free_port()
         srv = ROOT / "tests/helpers/counting_robot.py" if robot == "counting" else ROBOT_DIR / "robot_mcp.py"
         cmd = [sys.executable, str(srv)] + ([str(port), str(tmp_path / "calls.txt")] if robot == "counting" else [])
@@ -166,10 +175,15 @@ def kill_check(tmp_path):
             import httpx
             httpx.post(f"http://127.0.0.1:{sport}/stop")
         log.write_text("")
-        r = sp.run(["bash", str(KILL_SCRIPT), *env.pop("args", ["kill"])], input=answers, capture_output=True, text=True, timeout=60,
-                   env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "URL": f"http://127.0.0.1:{port}/mcp",
-                        "PY": sys.executable, "STOP_CMD": env.pop("STOP_CMD", "true"), "DROPIN_ROOT": str(tmp_path / "dropins"),
-                        "SETTLE_S": "0.2", **env})
+        cmd = ["bash", str(KILL_SCRIPT), *env.pop("args", ["kill"])]
+        senv = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "URL": f"http://127.0.0.1:{port}/mcp",
+                "PY": sys.executable, "STOP_CMD": env.pop("STOP_CMD", "true"), "DROPIN_ROOT": str(tmp_path / "dropins"),
+                "SETTLE_S": "0.2", "FAKE_TELEMETRY": f"http://127.0.0.1:{sport}/telemetry", **env}
+        if callable(answers):        # an operator who takes their time: answers(proc) talks to the script, returns its output
+            proc = sp.Popen(cmd, stdin=sp.PIPE, stdout=sp.PIPE, stderr=sp.STDOUT, env=senv)
+            out = answers(proc)
+            return proc.wait(60), out, log.read_text()
+        r = sp.run(cmd, input=answers, capture_output=True, text=True, timeout=60, env=senv)
         return r.returncode, r.stdout + r.stderr, log.read_text()
     yield run
     for p in procs:
@@ -200,7 +214,7 @@ def test_a_motor_stop_that_fails_at_the_end_says_so(kill_check):
 
 
 def test_the_control_run_expects_the_wheels_to_keep_turning(kill_check):
-    rc, out, _ = kill_check(args=["control"], answers="\nn\n")
+    rc, out, _ = kill_check(args=["control"], answers="\ny\nn\n")
     assert rc == 0 and "control behaved as expected" in out, out
 
 

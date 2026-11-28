@@ -214,8 +214,8 @@ def test_saved_maps_round_trip(app):
     listed = app.get("/api/maps").json()["maps"]
     assert [m["name"] for m in listed] == ["Test floor"]
     assert sql(app, "SELECT name FROM maps") == [("Test floor",)]
-    assert app.post(f"/api/maps/{saved['id']}/load").json() == {"ok": True, "name": "Test floor"}
-    assert app.post("/api/maps/9999/load").status_code == 404
+    assert app.post(f"/api/maps/{saved['id']}/load", json={}).json() == {"ok": True, "name": "Test floor"}   # as the page sends it
+    assert app.post("/api/maps/9999/load", json={}).status_code == 404
     app.delete(f"/api/maps/{saved['id']}")
     assert app.get("/api/maps").json()["maps"] == []
 

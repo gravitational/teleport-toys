@@ -8,7 +8,9 @@
 # Usage:
 #   bash beam_mcp_setup.sh --labels robot=beambot-sim [--allow 'sense_*,safety_*'] [--deny 'admin_*'] [--dir ~/work]
 #
-# Idempotent: safe to re-run (e.g. after the person who owns the beam changes what the beam may do).
+# Idempotent: safe to re-run (e.g. after the person who owns the beam changes what the beam may do). A re-run replaces
+# the allow rules for the Teleport servers (teleport-mcp-*), so a narrower --allow takes effect. Other allow rules and
+# deny rules from earlier runs stay.
 # Env: HANDSHAKE_WAIT (seconds to let the MCP server answer, default 6)
 set -uo pipefail
 
@@ -69,7 +71,8 @@ os.makedirs(os.path.join(d, ".claude"), exist_ok=True)
 sp = os.path.join(d, ".claude", "settings.json")
 settings = json.load(open(sp)) if os.path.exists(sp) else {}
 perm = settings.setdefault("permissions", {})
-perm["allow"] = sorted(set(perm.get("allow", [])) | set(allow_rules))
+ours = lambda r: any(r == f"mcp__{n}" or r.startswith(f"mcp__{n}__") for n in servers if n.startswith("teleport-mcp-"))
+perm["allow"] = sorted({r for r in perm.get("allow", []) if not ours(r)} | set(allow_rules))
 if deny_rules:
     perm["deny"] = sorted(set(perm.get("deny", [])) | set(deny_rules))
 settings["enableAllProjectMcpServers"] = True

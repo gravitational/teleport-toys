@@ -10,7 +10,7 @@ import math
 import os
 
 from .. import safety
-from ..registry import tool
+from ..registry import ToolError, tool
 
 SIM = os.environ.get("ROBOT_SIM", "1") == "1"
 BACKEND = "sim" if SIM else os.environ.get("DRIVE_BACKEND", "pca9685")
@@ -83,6 +83,8 @@ def drive(direction, duration_ms, speed=0.4):
     h = math.radians(_sim["heading_deg"])
     _sim["x_cm"] += d * math.cos(h)
     _sim["y_cm"] += d * math.sin(h)
+    if safety.state()["estopped"]:
+        raise ToolError(f"e-stop during drive; stopped after {ran} of {duration_ms} ms")
     return {"ran_ms": ran, "stopped": True, **state()}
 
 
@@ -103,6 +105,8 @@ def turn(direction, duration_ms, speed=0.4):
     ran = safety.timed(duration_ms, go, _stop)
     sign = 1 if direction == "left" else -1
     _sim["heading_deg"] = (_sim["heading_deg"] + sign * SIM_DEG_PER_S * speed * ran / 1000.0) % 360
+    if safety.state()["estopped"]:
+        raise ToolError(f"e-stop during turn; stopped after {ran} of {duration_ms} ms")
     return {"ran_ms": ran, "stopped": True, **state()}
 
 

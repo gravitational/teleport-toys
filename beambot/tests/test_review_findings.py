@@ -989,7 +989,7 @@ def test_docs_match_the_code():
     assert n_tools == 7 and "same seven MCP tools" in (EXAMPLE / "k8s/README.md").read_text(), n_tools
     assert "can watch, stop and resume the car" in re.sub(r"\s+", " ", (EXAMPLE / "README.md").read_text())
     top = (ROOT / "README.md").read_text()
-    assert "about 5 min, no cluster needed" in top and "~2 min" not in top
+    assert "about 8 min on our test machine, no cluster needed" in top and "~2 min" not in top
     about = top.split("## About BeamBot")[1].split("## What's in the box")[0]
     assert "same `sense_*` and `act_*` convention" not in about, "the PiCar's tools are not named that way"
     for tool in ("drive", "look", "say", "snapshot", "get_telemetry", "stop", "resume"):

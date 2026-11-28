@@ -1,4 +1,7 @@
-# A simulated PiCar-X that is always on, inside your cluster. Reached only through Teleport (see deploy.sh).
+# A simulated PiCar-X that is always on, inside your cluster, published through Teleport (see deploy.sh). Its /mcp has
+# no tool filter of its own, so the NetworkPolicy at the end lets only the Teleport agent's namespace reach it. That
+# holds only if your cluster's network plugin enforces NetworkPolicy (k3s does; minikube needs e.g. --cni=calico):
+# without one, any pod in the cluster can call /mcp.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -57,3 +60,22 @@ spec:
   ports:
     - {name: mcp, port: 8765, targetPort: mcp}
     - {name: stream, port: 8766, targetPort: stream}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: picar-sim-teleport-agent-only
+  namespace: picar-sim
+spec:
+  podSelector:
+    matchLabels: {app: picar-sim}
+  policyTypes: [Ingress]
+  ingress:
+    # deploy.sh installs the agent in the teleport-agent namespace (AGENT_NS) and nothing else runs there. The
+    # kubelet's readiness and liveness probes come from the node, which NetworkPolicy doesn't block.
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: teleport-agent}
+      ports:
+        - {protocol: TCP, port: 8765}
+        - {protocol: TCP, port: 8766}

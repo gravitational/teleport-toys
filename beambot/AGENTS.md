@@ -54,8 +54,9 @@ All tests run without a Teleport cluster, a Pi or an LLM key. Keep it that way.
 **Code style**
 - Shell: `set -euo pipefail`, quote everything, keep bash 3.2 (macOS) compatible on laptop-side scripts,
   `bash -n` clean, shellcheck clean where practical. Exit non-zero with a one-line reason.
-- Python: the MCP SDK is pinned `mcp>=1.9,<2` (2.x renamed the APIs used here). The five-Pi simulation pins
-  `mcp==1.19.0` on-device because that is the newest release with prebuilt armv7 wheels, and it ships a
+- Python: the PiCar robot and dashboard pin the MCP SDK to `mcp>=1.11,<2` (2.x renamed the APIs used here; on 1.9 a
+  malformed tool call, like the one `tests/live/check_mcp_bypass.sh` sends, broke the robot's MCP endpoint). The
+  five-Pi simulation pins `mcp==1.19.0` on-device because that is the newest release with prebuilt armv7 wheels, and it ships a
   zero-dependency stdlib fallback server (`MCP_IMPL=stdlib`). Keep both working.
 - Simulators must keep working: `SIMULATE=1` (PiCar) and `ROBOT_SIM=1` (five-Pi) are how everyone tests.
 - Storage in the PiCar app: Postgres through Teleport if reachable, otherwise SQLite, optional Redis.

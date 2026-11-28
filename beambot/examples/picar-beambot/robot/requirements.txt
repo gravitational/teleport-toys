@@ -1,5 +1,5 @@
 # On the Pi, also install SunFounder's robot-hat + picar-x libraries (see README).
 # picamera2 and opencv ship with / are installed alongside Raspberry Pi OS + vilib.
-mcp>=1.9,<2   # code uses the 1.x API (FastMCP, streamablehttp_client)
+mcp>=1.11,<2   # code uses the 1.x API (FastMCP, streamablehttp_client); on 1.9 a malformed tool call broke /mcp
 uvicorn
 pillow

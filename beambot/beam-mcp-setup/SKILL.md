@@ -127,7 +127,7 @@ An approved Access Request does not flow into a beam by itself. Beams are single
 | `ERROR: You do not have permission to delegate the following roles: [...]` from `tsh beams add --roles` | You can only hand a beam roles your own user holds. A role made with `tctl create` is not yours until you add it (`tctl users update <you> --set-roles <current roles>,<new role>`, which replaces the whole list), then `tsh logout` and log in again. The same message appears for blank or empty entries (`" "`, `a,,b`, `a,`). |
 | A beam has far more roles than you asked for (`access`, `editor`, `auditor`...) | `--roles=""` is the same as no `--roles`: the beam inherits ALL your roles. An unset shell variable (`--roles="$ROLES"`) does this silently. Check the list is non-empty before calling `tsh beams add`. The scripts here refuse a blank list. |
 | `python3 -m venv` fails: no ensurepip, or `pip install` says "externally managed" | The beam image has no python3-venv and marks system Python as managed. Use `python3 -m pip install --user --break-system-packages <pkg>`. |
-| `No module named 'mcp.server.fastmcp'` | `pip install mcp` pulled the 2.x SDK, which renamed `FastMCP`. Install `'mcp>=1.9,<2'`. |
+| `No module named 'mcp.server.fastmcp'` | `pip install mcp` pulled the 2.x SDK, which renamed `FastMCP`. Install `'mcp>=1.11,<2'`. |
 | Everything gone after recreating the beam | Beams are ephemeral (by default they expire after 12 hours). Re-run `beam_mcp_up.sh` for the new beam. |
 
 For the manual procedure and a live verification script, see `references/manual-steps.md` and

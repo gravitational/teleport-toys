@@ -4,9 +4,10 @@ Naming convention is load-bearing: Teleport RBAC filters MCP tools by name.
   sense_*   read-only (camera, sensors, status)        -> beambot-sim-observer
   act_*     moves hardware                             -> beambot-sim-operator
   safety_*  can only make the robot safer (stop/estop) -> everyone
-  admin_*   clears e-stop / changes limits             -> beambot-sim-admin
+  admin_*   clears the e-stop                          -> beambot-sim-admin
 """
 import json
+import math
 
 TOOLS = {}
 PREFIXES = ("sense_", "act_", "safety_", "admin_")
@@ -80,6 +81,8 @@ def validate(schema, args):
                 v = int(v)
             if not isinstance(v, py):
                 raise ToolError(f"{k} must be {t}, got {type(v).__name__}")
+            if isinstance(v, float) and not math.isfinite(v):  # NaN passes every < and > check below
+                raise ToolError(f"{k} must be a finite number")
         if "enum" in p and v not in p["enum"]:
             raise ToolError(f"{k} must be one of {p['enum']}")
         if "minimum" in p and v < p["minimum"]:

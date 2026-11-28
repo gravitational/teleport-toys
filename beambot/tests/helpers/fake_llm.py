@@ -3,6 +3,7 @@
 Serves the OpenAI Responses API (POST /v1/responses) and the Anthropic Messages API (POST /v1/messages).
 Tests load a script with POST /__script {"steps": [...]}; every model turn pops the next step:
     {"tool": "snapshot", "args": {}}   -> the model asks for a tool call
+    {"tools": [{"tool": "drive", "args": {...}}, ...]}   -> several tool calls in one turn
     {"text": "all done"}               -> the model answers and the agent loop ends
 Every request body is recorded and readable at GET /__requests.
 
@@ -40,9 +41,9 @@ async def responses(req):
     step = _next()
     if step.get("redirect"):          # what Teleport does for an identity that can't see the model app
         return Response(status_code=302, headers={"location": "https://example.beams.run/web/launch/openai"})
-    if "tool" in step:
-        out = [{"type": "function_call", "call_id": "call_" + uuid.uuid4().hex[:8], "name": step["tool"],
-                "arguments": json.dumps(step.get("args", {}))}]
+    if "tool" in step or "tools" in step:
+        out = [{"type": "function_call", "call_id": "call_" + uuid.uuid4().hex[:8], "name": c["tool"],
+                "arguments": json.dumps(c.get("args", {}))} for c in step.get("tools") or [step]]
     else:
         out = [{"type": "message", "content": [{"type": "output_text", "text": step["text"]}]}]
     return JSONResponse({"output": out})
@@ -54,14 +55,15 @@ async def messages(req):
     step = _next()
     if step.get("redirect"):
         return Response(status_code=302, headers={"location": "https://example.beams.run/web/launch/anthropic"})
-    if "tool" in step:
-        content = [{"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex[:8], "name": step["tool"],
-                    "input": step.get("args", {})}]
+    calls = step.get("tools") or ([step] if "tool" in step else [])
+    if calls:
+        content = [{"type": "tool_use", "id": "toolu_" + uuid.uuid4().hex[:8], "name": c["tool"],
+                    "input": c.get("args", {})} for c in calls]
     else:
         content = [{"type": "text", "text": step["text"]}]
     return JSONResponse({"id": "msg_" + uuid.uuid4().hex[:8], "type": "message", "role": "assistant",
                          "model": body.get("model"), "content": content, "stop_sequence": None,
-                         "stop_reason": "tool_use" if "tool" in step else "end_turn",
+                         "stop_reason": "tool_use" if calls else "end_turn",
                          "usage": {"input_tokens": 1, "output_tokens": 1}})
 
 
