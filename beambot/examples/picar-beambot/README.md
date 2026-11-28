@@ -54,7 +54,7 @@ hardware. Pick where the fake robot lives:
 ### A. Your laptop
 
 ```bash
-pip install "mcp>=1.9,<2" uvicorn pillow fastapi httpx anthropic "psycopg[binary]" redis
+pip install "mcp>=1.11,<2" uvicorn pillow fastapi httpx anthropic "psycopg[binary]" redis
 SIMULATE=1 python3 robot/robot_mcp.py &          # a fake car in a 4 m x 3 m room with two desks: MCP on 8765, video/telemetry on 8766
 
 cd beam-app
@@ -80,7 +80,7 @@ tsh beams ssh <beam>
 ```bash
 # in the beam
 tar xzf beambot.tgz 2>/dev/null && cd picar-beambot
-python3 -m pip install --user --break-system-packages -q "mcp>=1.9,<2" uvicorn pillow fastapi httpx anthropic
+python3 -m pip install --user --break-system-packages -q "mcp>=1.11,<2" uvicorn pillow fastapi httpx anthropic
 (cd robot && SIMULATE=1 SAY_CMD=true nohup python3 robot_mcp.py >/tmp/robot.log 2>&1 &)
 cd beam-app && ROBOT_MCP_URL=http://127.0.0.1:8765/mcp ROBOT_STREAM_URL=http://127.0.0.1:8766 \
   nohup python3 -m uvicorn app:app --host 0.0.0.0 --port 8080 >/tmp/app.log 2>&1 &
@@ -308,7 +308,8 @@ The Data panel follows the selected task. Add your own by adding one entry to `T
 - Counting is from camera frames; overlapping views can double count. Counts are stored per location so you can review them.
 - The dashboard loads Lato from Google Fonts and Phosphor icons from unpkg. Offline, text falls back to system
   fonts and the icons are blank.
-- `mcp>=1.9,<2` only. The 2.x SDK renamed the APIs used here.
+- `mcp>=1.11,<2` only. The 2.x SDK renamed the APIs used here, and on 1.9 a malformed tool call (the bypass check
+  sends one) broke the robot's MCP endpoint until a restart.
 
 ## Check that the car stops when the server dies
 

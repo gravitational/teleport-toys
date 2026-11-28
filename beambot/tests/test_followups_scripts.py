@@ -222,3 +222,15 @@ def test_picar_readme_documents_the_mcp_stop_cap():
     n = re.search(r"^MAX_MCP_STOPS_IN_FLIGHT = (\d+)$", app, re.M).group(1)
     text = (ROOT / "examples/picar-beambot/README.md").read_text()
     assert re.search(rf"`MAX_MCP_STOPS_IN_FLIGHT` \({n}\)", text), "README must name the cap and its value"
+
+
+# --------------------------------------------------------------------------- the PiCar's MCP SDK floor
+def test_the_picar_mcp_floor_is_at_least_1_11():
+    """On mcp 1.9 a malformed tool call (check_mcp_bypass.sh sends one) broke the robot's /mcp until a restart."""
+    for req in ("examples/picar-beambot/robot/requirements.txt", "examples/picar-beambot/beam-app/requirements.txt",
+                "tests/requirements.txt"):
+        m = re.search(r"^mcp>=(\d+)\.(\d+)\S*,<2\b", (ROOT / req).read_text(), re.M)
+        assert m and (int(m.group(1)), int(m.group(2))) >= (1, 11), f"{req}: the mcp floor must be 1.11 or newer, below 2"
+    stale = [f"{p.relative_to(ROOT)}" for p in test_no_tbot.files() if "mcp>=1.9," in p.read_text(errors="ignore")]
+    assert not stale, f"still documents mcp>=1.9: {stale}"
+    assert '"mcp==1.19.0"' in (ROOT / "examples/advanced-simulation/pi/setup_pi.sh").read_text(), "the five-Pi pin stays"

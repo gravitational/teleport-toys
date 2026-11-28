@@ -1,6 +1,6 @@
 """Smoke test: start the PiCar-X server in simulation and talk to it with the official MCP client.
 
-    pip install "mcp>=1.9,<2" uvicorn pillow pytest
+    pip install "mcp>=1.11,<2" uvicorn pillow pytest
     pytest robot/test_robot_sim.py
 """
 import asyncio

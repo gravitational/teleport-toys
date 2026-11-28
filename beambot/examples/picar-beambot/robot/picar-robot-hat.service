@@ -1,6 +1,6 @@
 # BeamBot robot server on a PiCar-X driven by robot_hat_lite.py (no SunFounder libraries), e.g. Arch Linux ARM.
 #   install -D -m644 robot_mcp.py robot_hat_lite.py motor_test.py -t /opt/picar-beambot/
-#   python3 -m venv --system-site-packages /opt/picar-beambot/venv && /opt/picar-beambot/venv/bin/pip install "mcp>=1.9,<2" uvicorn
+#   python3 -m venv --system-site-packages /opt/picar-beambot/venv && /opt/picar-beambot/venv/bin/pip install "mcp>=1.11,<2" uvicorn
 #   cp picar-robot-hat.service /etc/systemd/system/picar-robot.service && systemctl enable --now picar-robot
 # The robot user needs groups robohw (i2c, gpiochip), video (camera, /dev/dma_heap; see README) and audio (speaker:
 # pacman -S espeak-ng alsa-utils; override the voice with Environment=SAY_CMD=...).

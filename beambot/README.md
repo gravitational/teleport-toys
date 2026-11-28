@@ -66,7 +66,7 @@ Then `tsh beams ssh <beam>` and run `claude`. To give the agent hands later, cre
 | `ERROR: You do not have permission to delegate the following roles: [...]` from `tsh beams add --roles` | You can only hand a beam roles your own user holds (also shown for blank entries like `" "` or `a,,b`). | Add the role to your user (`tctl users update <you> --set-roles <current roles>,<new role>`), log in again, retry. |
 | A beam holds far more roles than you asked for | `--roles=""` means "no `--roles`": the beam inherits ALL your roles. An unset shell variable does it silently. | Never pass an empty list. The scripts here refuse a blank one. |
 | `tsh mcp ls` is empty inside the beam | The beam only holds the roles you gave it. | Include one that grants the MCP app: the built-in `mcp-user` matches every MCP app, but it grants every tool, including the robot's `resume` (it can lift an emergency stop). Prefer a role from the example's `roles.yaml`. |
-| `No module named 'mcp.server.fastmcp'` | `pip install mcp` pulled the 2.x SDK, which renamed `FastMCP`. | Install `'mcp>=1.9,<2'`. |
+| `No module named 'mcp.server.fastmcp'` | `pip install mcp` pulled the 2.x SDK, which renamed `FastMCP`. | Install `'mcp>=1.11,<2'`. |
 | `python3 -m venv` fails, or `pip` says "externally managed" | Beam images have no python3-venv and mark system Python as managed. | `python3 -m pip install --user --break-system-packages <pkg>`. |
 | `tsh proxy ...` exits right away inside a beam | The beam's identity lacks access to that app or database. | Create the beam with roles that grant it (`--roles`), and read `/tmp/proxy-*.log`. |
 | Redis through Teleport fails right after connecting | Newer `redis-py` opens with RESP3 `HELLO 3`, which Teleport's Redis proxy rejects. | Connect with `protocol=2`. |
@@ -81,7 +81,7 @@ Measured laptop → Teleport → Pi with the MCP Python client against the five-
 
 - A Teleport cluster with Beams (Teleport and `tsh` **18.11.9+** for production Beams, 18.3+ for MCP access). Keep Pi agents at or below the cluster's version.
 - `tsh` on your laptop (`tctl` only for an admin creating the roles); `jq` for the PiCar deploy script.
-- Python 3.10+ and `pip install "mcp>=1.9,<2"`. The code uses the 1.x SDK API; 2.x renamed it.
+- Python 3.10+ and `pip install "mcp>=1.11,<2"`. The code uses the 1.x SDK API; 2.x renamed it.
 - Hardware examples: a PiCar-X, or five Raspberry Pi 3 (see each example). Neither is needed for the simulators.
 
 ## Tested on a real cluster
