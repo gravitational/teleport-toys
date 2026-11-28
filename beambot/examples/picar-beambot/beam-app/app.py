@@ -23,18 +23,22 @@ import shutil
 import socket
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 from urllib.parse import urlparse
 
 import anthropic
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+from pydantic import BaseModel, Field
 
 from automap import AutoMapper, Geometry
 
@@ -172,51 +176,59 @@ class Store:
             id {serial}, ts DOUBLE PRECISION, name TEXT, cell_cm INTEGER, grid_size INTEGER,
             explored_m2 DOUBLE PRECISION, obstacle_cells INTEGER, moves INTEGER, landmarks TEXT, grid TEXT)""")
 
+    def _db(self):
+        """The connection. Postgres comes through a tunnel that can drop, and a dropped connection never recovers by
+        itself: open a new one. While the tunnel is still down that fails, and the caller shows no data."""
+        if self.kind == "Postgres" and self.conn.closed:
+            import psycopg
+            self.conn = psycopg.connect(DATABASE_URL, autocommit=True, connect_timeout=5)
+        return self.conn
+
     # ---- saved office maps (the occupancy grid + landmarks, ~35 KB each) ----
     def save_map(self, name, grid, summary, moves, landmarks):
         p = self.ph
-        self.conn.execute(
+        self._db().execute(
             f"INSERT INTO maps (ts, name, cell_cm, grid_size, explored_m2, obstacle_cells, moves, landmarks, grid) "
             f"VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p})",
             (time.time(), name, summary["cell_cm"], GRID, summary["explored_m2"], summary["obstacle_cells"],
              int(moves), json.dumps(landmarks), grid))
-        return self.conn.execute("SELECT MAX(id) FROM maps").fetchone()[0]
+        return self._db().execute("SELECT MAX(id) FROM maps").fetchone()[0]
 
     def maps(self):
         cols = ["id", "ts", "name", "explored_m2", "obstacle_cells", "moves", "landmarks"]
-        cur = self.conn.execute(f"SELECT {', '.join(cols)} FROM maps ORDER BY id DESC LIMIT 20")
+        cur = self._db().execute(f"SELECT {', '.join(cols)} FROM maps ORDER BY id DESC LIMIT 20")
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
         for row in rows:
             row["landmarks"] = len(json.loads(row["landmarks"] or "[]"))
         return rows
 
     def map_get(self, map_id):
-        cur = self.conn.execute(f"SELECT name, grid, landmarks FROM maps WHERE id = {self.ph}", (int(map_id),))
+        cur = self._db().execute(f"SELECT name, grid, landmarks FROM maps WHERE id = {self.ph}", (int(map_id),))
         row = cur.fetchone()
         return {"name": row[0], "grid": row[1], "landmarks": json.loads(row[2] or "[]")} if row else None
 
     def map_delete(self, map_id):
-        self.conn.execute(f"DELETE FROM maps WHERE id = {self.ph}", (int(map_id),))
+        self._db().execute(f"DELETE FROM maps WHERE id = {self.ph}", (int(map_id),))
 
     def add_count(self, obj, n, conf, pose, note):
         p = self.ph
-        self.conn.execute(
+        self._db().execute(
             f"INSERT INTO counts (ts, object, count, confidence, x_cm, y_cm, heading_deg, note) "
             f"VALUES ({p},{p},{p},{p},{p},{p},{p},{p})",
             (time.time(), obj.lower().strip(), int(n), int(conf), pose["x_cm"], pose["y_cm"], pose["heading_deg"], note))
 
     def counts(self):
         cols = ["id", "ts", "object", "count", "confidence", "x_cm", "y_cm", "heading_deg", "note"]
-        cur = self.conn.execute(f"SELECT {', '.join(cols)} FROM counts ORDER BY id")
+        cur = self._db().execute(f"SELECT {', '.join(cols)} FROM counts ORDER BY id")
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
     def clear(self):
-        self.conn.execute("DELETE FROM counts")
+        self._db().execute("DELETE FROM counts")
 
     def stats(self):
         t0 = time.time()
         try:
-            n = self.conn.execute("SELECT COUNT(*) FROM counts").fetchone()[0]
+            n = self._db().execute("SELECT COUNT(*) FROM counts").fetchone()[0]
             ok = True
         except Exception:  # noqa: BLE001
             n, ok = None, False
@@ -235,12 +247,25 @@ def _num(v, default=0):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else default
 
 
+def clean_input(inp):
+    """A feed item's tool arguments, kept only as short names with finite numbers, booleans or short strings. NaN or
+    Infinity would make the whole /api/beam answer invalid JSON (a 500); nested values are dropped too."""
+    if not isinstance(inp, dict):
+        return {}
+    out = {}
+    for k, v in list(inp.items())[:8]:
+        if isinstance(v, (bool, int)) or (isinstance(v, float) and math.isfinite(v)):
+            out[str(k)[:32]] = v
+        elif isinstance(v, str):
+            out[str(k)[:32]] = v[:80]
+    return out
+
+
 def clean_activity(x):
     """A feed item with every field forced to its expected type, or None if it is not an item at all."""
     if not isinstance(x, dict) or not isinstance(x.get("tool"), str):
         return None
-    inp = x.get("input")
-    return {"ts": _num(x.get("ts")), "tool": x["tool"][:64], "input": inp if isinstance(inp, dict) else {},
+    return {"ts": _num(x.get("ts")), "tool": x["tool"][:64], "input": clean_input(x.get("input")),
             "ok": x.get("ok") is True, "ms": int(_num(x.get("ms"))),
             "detail": x["detail"][:160] if isinstance(x.get("detail"), str) else ""}
 
@@ -308,6 +333,24 @@ class Cache:
 
 
 cache = Cache()
+
+# Postgres and Redis come through Teleport tunnels that can stall, and both clients block. So every call to them runs on
+# this one thread, never on the event loop: a stalled tunnel slows the data panels, never STOP or a robot call.
+db_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db")
+DB_TIMEOUT_S = 2
+_db_writes = set()
+
+
+async def db(fn, *args):
+    """fn(*args) on the database thread. Raises TimeoutError after DB_TIMEOUT_S; a call still queued then is dropped."""
+    return await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(db_thread, fn, *args), DB_TIMEOUT_S)
+
+
+def db_later(fn, *args):
+    """Fire and forget (feed items, telemetry): written when the database thread gets to it, dropped after DB_TIMEOUT_S."""
+    t = asyncio.ensure_future(db(fn, *args))
+    _db_writes.add(t)
+    t.add_done_callback(lambda f: (_db_writes.discard(f), f.cancelled() or f.exception()))
 
 # =============================================================================
 # Office map: occupancy grid built from ultrasonic readings + dead-reckoned pose
@@ -428,7 +471,8 @@ def log_activity(tool, args, ok, ms, detail=""):
     item = {"ts": time.time(), "tool": tool, "input": args, "ok": ok, "ms": ms, "detail": detail[:160]}
     activity.append(item)
     del activity[:-100]
-    cache.push_activity(item)
+    if cache.r:
+        db_later(cache.push_activity, item)
 
 
 async def run_cmd(*args, timeout=6):
@@ -517,8 +561,20 @@ async def beam_info(host_header: str):
         data = dict(data)
     data["published_url"] = f"https://{host_header}" if host_header else None
     data["inference_stats"] = {**inference, "avg_ms": round(inference["total_ms"] / inference["calls"]) if inference["calls"] else None}
-    data["activity"] = cache.activity() or activity[-25:][::-1]
-    data["databases"] = {"postgres": store.stats(), "redis": cache.stats()}
+    try:
+        feed = await db(cache.activity) if cache.r else None
+    except Exception:  # noqa: BLE001  stalled tunnel: show this app's own calls
+        feed = None
+    data["activity"] = feed or activity[-25:][::-1]
+    try:
+        pg = await db(store.stats)
+    except Exception as e:  # noqa: BLE001
+        pg = {"kind": store.kind, "ok": False, "error": f"no answer: {why(e)}"}
+    try:
+        rd = await db(cache.stats) if cache.r else cache.stats()
+    except Exception as e:  # noqa: BLE001
+        rd = {"enabled": True, "ok": False, "error": f"no answer: {why(e)}"}
+    data["databases"] = {"postgres": pg, "redis": rd}
     return data
 
 
@@ -532,8 +588,8 @@ async def telemetry_poller():
                 r = await http.get(f"{ROBOT_STREAM_URL}/telemetry")
                 t = r.json()
                 office_map.integrate(t)
-                if int(time.time() * 5) % 5 == 0:   # ~1/s
-                    cache.set_telemetry({k: v for k, v in t.items() if k != "path"})
+                if cache.r and int(time.time() * 5) % 5 == 0:   # ~1/s
+                    db_later(cache.set_telemetry, {k: v for k, v in t.items() if k != "path"})
             except Exception as e:  # noqa: BLE001
                 office_map.telemetry = {**office_map.telemetry, "error": f"robot unreachable: {why(e)}"}
             await asyncio.sleep(0.2)
@@ -548,6 +604,65 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+
+
+def from_page(request: Request):
+    """A JSON POST from this page. A browser sends a form, text/plain or untyped POST from another site without asking
+    this app first, and a JSON one from another origin only if the app agrees (it never does). Sec-Fetch-Site also
+    turns away sibling sites, such as another beam's published app."""
+    ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    return request.headers.get("sec-fetch-site", "same-origin") in ("same-origin", "none") and ctype == "application/json"
+
+
+def page_only(request: Request):
+    """On every POST that can move the robot or change what the app holds. Not on the stop routes (/api/stop,
+    /api/drive/stop, /api/automap/stop): a forged stop can only stop the car, and STOP must work however it is sent."""
+    if not from_page(request):
+        raise HTTPException(403, "Only the dashboard page can do this.")
+
+
+@app.exception_handler(RequestValidationError)
+async def bad_body(request: Request, exc: RequestValidationError):
+    """422 naming the bad fields without echoing them: a NaN echoed back is invalid JSON, and that was a 500."""
+    msg = "; ".join(f"{'.'.join(str(p) for p in e['loc'][1:]) or 'body'}: {e['msg']}" for e in exc.errors())
+    return JSONResponse({"detail": msg}, status_code=422)
+
+
+# Request bodies. Numbers must be finite; the robot clamps speed, time and angles to its own limits on top of these.
+class ChatBody(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    task: str | None = None
+
+
+class DriveBody(BaseModel):
+    speed: int = Field(0, ge=-100, le=100)
+    seconds: float = Field(1, ge=0, le=10, allow_inf_nan=False)
+    steer_deg: int = Field(0, ge=-90, le=90)
+
+
+class LookBody(BaseModel):
+    pan_deg: int = Field(0, ge=-90, le=90)
+    tilt_deg: int = Field(0, ge=-90, le=90)
+
+
+class SayBody(BaseModel):
+    text: str = ""
+
+
+class AutomapBody(BaseModel):   # AutoMapper.start clamps these to its ranges
+    speed: float | None = Field(None, allow_inf_nan=False)
+    max_moves: float | None = Field(None, allow_inf_nan=False)
+    max_minutes: float | None = Field(None, allow_inf_nan=False)
+    vision: bool = True
+
+
+class ResetBody(BaseModel):
+    what: Literal["chat", "map", "counts", "all"] = "chat"
+
+
+class MapBody(BaseModel):
+    name: str | None = None
+
 
 # =============================================================================
 # Chat agent: LLM (codex endpoint or Claude) + robot MCP tools (via Teleport) + local counter/map tools
@@ -568,8 +683,8 @@ LOCAL_TOOLS = [
 ]
 
 
-def tally():
-    rows = store.counts()
+async def tally():
+    rows = await db(store.counts)
     totals = {}
     for r in rows:
         totals[r["object"]] = totals.get(r["object"], 0) + r["count"]
@@ -588,8 +703,18 @@ def mcp_content_to_claude(result):
     return blocks or [{"type": "text", "text": "(no output)"}]
 
 
-history = []
+history = []          # one conversation, shared by everyone who opens the page
 chat_lock = asyncio.Lock()
+HISTORY_TURNS = 10    # the model sees the last 10 messages and the steps they led to; older ones are dropped
+MAX_AGENT_STEPS = 20  # per message: a model turn is a step, and so is each robot call in it (8 drives in one turn = 8)
+
+
+def trim_history():
+    """Drop the oldest exchanges so that, with the next message, HISTORY_TURNS remain. Cut only before a typed message,
+    so no tool call is left without its result."""
+    starts = [i for i, m in enumerate(history) if m["role"] == "user" and isinstance(m["content"], str)]
+    if len(starts) >= HISTORY_TURNS:
+        del history[:starts[len(starts) - HISTORY_TURNS + 1]]
 
 
 def prune_old_images(keep_last=2):
@@ -656,6 +781,7 @@ async def robot_latched_now():
 
 async def run_job(job, message, task):
     async with chat_lock:  # one robot, one conversation at a time
+        trim_history()
         start = len(history)
         try:
             job.update(status="done", **await run_agent(message, task, job["trace"]))
@@ -668,10 +794,9 @@ async def run_job(job, message, task):
             job.update(status="error", detail=why(e))
 
 
-@app.post("/api/chat")
-async def chat(req: Request):
-    body = await req.json()
-    task = TASKS.get(body.get("task"), TASKS["count"])
+@app.post("/api/chat", dependencies=[Depends(page_only)])
+async def chat(body: ChatBody):
+    task = TASKS.get(body.task, TASKS["count"])
     if await robot_latched_now():
         return JSONResponse({"detail": HALT_MSG}, status_code=423)
     if chat_lock.locked():
@@ -680,7 +805,7 @@ async def chat(req: Request):
     jobs[job_id] = job = {"status": "running", "trace": [], "started": time.time()}
     for old in list(jobs)[:-20]:
         del jobs[old]
-    t = asyncio.create_task(run_job(job, body["message"], task))
+    t = asyncio.create_task(run_job(job, body.message, task))
     _job_tasks.add(t)
     t.add_done_callback(_job_tasks.discard)
     return {"job": job_id}
@@ -841,7 +966,8 @@ async def run_agent(message, task, trace=None):
                            for t in (await session.list_tools()).tools if t.name not in AGENT_HIDDEN_TOOLS]
             robot_names = {t["name"] for t in robot_tools}
             tools = robot_tools + LOCAL_TOOLS
-            for _ in range(20):  # max agent steps per message
+            steps = 0
+            while steps < MAX_AGENT_STEPS:
                 prune_old_images()
                 resp = await call_llm(model=MODEL, max_tokens=1500, system=system, tools=tools, messages=history)
                 history.append({"role": "assistant", "content": [
@@ -850,7 +976,7 @@ async def run_agent(message, task, trace=None):
                     for b in resp.content if b.type in ("text", "tool_use")]})
                 if resp.stop_reason != "tool_use":
                     break
-                results = []
+                results, robot_calls = [], 0
                 for b in resp.content:
                     if b.type != "tool_use":
                         continue
@@ -860,16 +986,20 @@ async def run_agent(message, task, trace=None):
                     try:
                         if b.name == "record_count":
                             pose = office_map.telemetry.get("pose", {"x_cm": 0, "y_cm": 0, "heading_deg": 0})
-                            store.add_count(b.input["object"], b.input["count"], b.input.get("confidence", 70),
-                                            pose, b.input.get("note", ""))
-                            content = [{"type": "text", "text": json.dumps(tally()["totals"])}]
+                            await db(store.add_count, b.input["object"], b.input["count"], b.input.get("confidence", 70),
+                                     pose, b.input.get("note", ""))
+                            content = [{"type": "text", "text": json.dumps((await tally())["totals"])}]
                         elif b.name == "get_tally":
-                            content = [{"type": "text", "text": json.dumps(tally(), default=str)}]
+                            content = [{"type": "text", "text": json.dumps(await tally(), default=str)}]
                         elif b.name == "get_map_summary":
                             content = [{"type": "text", "text": json.dumps(office_map.summary())}]
                         elif b.name not in robot_names:   # includes the hidden `resume`: never forwarded to the robot
                             content = [{"type": "text", "text": f"error: unknown tool {b.name}"}]
+                        elif b.name != "stop" and steps + robot_calls >= MAX_AGENT_STEPS:
+                            content = [{"type": "text", "text": f"error: not sent: this message has used its "
+                                                                f"{MAX_AGENT_STEPS} steps"}]
                         else:
+                            robot_calls += 1
                             if halt["on"] and b.name != "stop":
                                 raise Halted(HALT_MSG)
                             if b.name == "drive":
@@ -889,6 +1019,7 @@ async def run_agent(message, task, trace=None):
                         content = [{"type": "text", "text": f"error: {e}"}]
                     results.append({"type": "tool_result", "tool_use_id": b.id, "content": content})
                 history.append({"role": "user", "content": results})
+                steps += max(1, robot_calls)
     text = "".join(b.text for b in resp.content if b.type == "text")
     return {"reply": text, "trace": trace}
 
@@ -907,16 +1038,19 @@ async def beam(req: Request):
     return await beam_info(host)
 
 
-@app.post("/api/reset")
-async def reset(req: Request):
-    what = (await req.json()).get("what", "chat")
+@app.post("/api/reset", dependencies=[Depends(page_only)])
+async def reset(body: ResetBody = ResetBody()):
+    what = body.what
     if what in ("chat", "all"):
         history.clear()
     if what in ("map", "all"):
         auto_mapper.stop("map reset")
         office_map.reset()
     if what in ("counts", "all"):
-        store.clear()
+        try:
+            await db(store.clear)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"counts not cleared: {why(e)}"}, status_code=503)
     return {"ok": True}
 
 
@@ -1012,8 +1146,7 @@ async def resume(request: Request):
     """Clear the latch on the robot (stream app, or the MCP `resume` tool), then in this app. If the robot can't be
     reached the latch stays: the page keeps showing Resume. Refused while a robot call sent before STOP could still
     land, and for a JSON POST only from this page (a form or text/plain request from another site is refused)."""
-    if (request.headers.get("sec-fetch-site", "same-origin") not in ("same-origin", "none")
-            or "application/json" not in request.headers.get("content-type", "")):
+    if not from_page(request):
         return JSONResponse({"ok": False, "error": "Resume must be pressed on the dashboard page."}, status_code=403)
     wait = halt.get("quiet_until", 0) - time.time()
     if flight["n"] > 0 or wait > 0:
@@ -1077,18 +1210,16 @@ manual_lock = asyncio.Lock()
 manual_stop = {"gen": 0}
 
 
-@app.post("/api/drive")
-async def manual_drive(req: Request):
+@app.post("/api/drive", dependencies=[Depends(page_only)])
+async def manual_drive(b: DriveBody):
     """Hold-to-drive from the UI pad: the same `drive` tool the agent uses, so Teleport RBAC + audit apply.
     The UI re-sends every ~0.8 s while held; each call is a short non-blocking move the robot times out itself."""
-    b = await req.json()
     auto_mapper.stop("manual drive took over")
     gen = manual_stop["gen"]
     async with manual_lock:
         if gen != manual_stop["gen"]:   # released while this was queued
             return {"ok": True, "result": "skipped: stopped"}
-        return await robot_call("drive", {"speed": int(b.get("speed", 0)), "seconds": float(b.get("seconds", 1)),
-                                          "steer_deg": int(b.get("steer_deg", 0)), "wait": False})
+        return await robot_call("drive", {"speed": b.speed, "seconds": b.seconds, "steer_deg": b.steer_deg, "wait": False})
 
 
 @app.post("/api/drive/stop")
@@ -1134,36 +1265,45 @@ async def auto_call(tool, args):
         return False, why(e)
 
 
-@app.post("/api/automap/start")
-async def automap_start(req: Request):
-    """Body (all optional): speed 15-40, max_moves, max_minutes, vision (camera + model during scans, default on)."""
-    b = await req.json() if (await req.body()) else {}
+@app.post("/api/automap/start", dependencies=[Depends(page_only)])
+async def automap_start(b: AutomapBody = AutomapBody()):
+    """Body (all optional): speed 15-40, max_moves 10-2000, max_minutes 1-60, vision (camera + model during scans,
+    default on). Out-of-range numbers are clamped."""
     if await robot_latched_now():
         return JSONResponse({"ok": False, "error": HALT_MSG}, status_code=423)
-    on_view = describe_view if b.get("vision", True) else None
-    if not auto_mapper.start(auto_call, speed=b.get("speed"), max_moves=b.get("max_moves"),
-                             max_minutes=b.get("max_minutes"), on_view=on_view):
+    on_view = describe_view if b.vision else None
+    if not auto_mapper.start(auto_call, speed=b.speed, max_moves=b.max_moves, max_minutes=b.max_minutes,
+                             on_view=on_view):
         return JSONResponse({"ok": False, "error": "already running"}, status_code=409)
     return {"ok": True}
 
 
 @app.get("/api/maps")
 async def maps_list():
-    return {"maps": store.maps(), "store": store.kind}
+    try:
+        return {"maps": await db(store.maps), "store": store.kind}
+    except Exception as e:  # noqa: BLE001
+        return {"maps": [], "store": store.kind, "error": f"maps unavailable: {why(e)}"}
 
 
-@app.post("/api/maps")
-async def maps_save(req: Request):
-    b = await req.json() if (await req.body()) else {}
-    name = str(b.get("name") or f"Office {time.strftime('%b %d %H:%M')}")[:60]
+@app.post("/api/maps", dependencies=[Depends(page_only)])
+async def maps_save(b: MapBody = MapBody()):
+    name = (b.name or f"Office {time.strftime('%b %d %H:%M')}")[:60]
     s = office_map.summary()
-    mid = store.save_map(name, office_map.dump(), s, auto_mapper.status.get("moves", 0), office_map.landmarks)
+    try:
+        mid = await db(store.save_map, name, office_map.dump(), s, auto_mapper.status.get("moves", 0),
+                       list(office_map.landmarks))
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"not saved: {why(e)}"}, status_code=503)
     return {"ok": True, "id": mid, "name": name, "store": store.kind, "explored_m2": s["explored_m2"]}
 
 
-@app.post("/api/maps/{map_id}/load")
+@app.post("/api/maps/{map_id}/load", dependencies=[Depends(page_only)])
 async def maps_load(map_id: int):
-    m = store.map_get(map_id)
+    try:
+        m = await db(store.map_get, map_id)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"maps unavailable: {why(e)}"}, status_code=503)
     if not m:
         return JSONResponse({"ok": False, "error": "no such map"}, status_code=404)
     auto_mapper.stop("a saved map was loaded")
@@ -1173,15 +1313,17 @@ async def maps_load(map_id: int):
 
 @app.delete("/api/maps/{map_id}")
 async def maps_delete(map_id: int):
-    store.map_delete(map_id)
+    try:
+        await db(store.map_delete, map_id)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": f"not deleted: {why(e)}"}, status_code=503)
     return {"ok": True}
 
 
-@app.post("/api/say")
-async def say(req: Request):
+@app.post("/api/say", dependencies=[Depends(page_only)])
+async def say(b: SayBody = SayBody()):
     """Speaker demo: the robot's `say` MCP tool through Teleport, like every other robot call."""
-    b = await req.json() if (await req.body()) else {}
-    return await robot_call("say", {"text": str(b.get("text") or "Hello Beams, I love you")[:120]})
+    return await robot_call("say", {"text": (b.text or "Hello Beams, I love you")[:120]})
 
 
 @app.post("/api/automap/stop")
@@ -1189,10 +1331,9 @@ async def automap_stop():
     return {"ok": auto_mapper.stop("stopped from the UI")}
 
 
-@app.post("/api/look")
-async def manual_look(req: Request):
-    b = await req.json()
-    return await robot_call("look", {"pan_deg": int(b.get("pan_deg", 0)), "tilt_deg": int(b.get("tilt_deg", 0))})
+@app.post("/api/look", dependencies=[Depends(page_only)])
+async def manual_look(b: LookBody):
+    return await robot_call("look", {"pan_deg": b.pan_deg, "tilt_deg": b.tilt_deg})
 
 
 def robot_latched():
@@ -1203,8 +1344,12 @@ def robot_latched():
 
 @app.get("/api/state")
 async def state():
+    try:
+        counts = await tally()
+    except Exception as e:  # noqa: BLE001  database stalled or gone: no counts this time, never an error
+        counts = {"totals": {}, "records": [], "areas": 0, "avg_confidence": None, "error": f"counts unavailable: {why(e)}"}
     return {"telemetry": dict(office_map.telemetry), "grid": office_map.encoded(), "grid_size": GRID,
-            "cell_cm": CELL_CM, "tally": tally(), "map": office_map.summary(), "auto": auto_mapper.status,
+            "cell_cm": CELL_CM, "tally": counts, "map": office_map.summary(), "auto": auto_mapper.status,
             "landmarks": office_map.landmarks, "hazards": office_map.hazards[-5:], "loaded_map": office_map.loaded,
             "vision": vision, "halted": halt["on"] or robot_latched()}
 
