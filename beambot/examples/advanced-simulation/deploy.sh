@@ -3,13 +3,15 @@
 # Uses your ~/.ssh/config host aliases (pi1..pi5). Copy cluster.conf.example to cluster.conf first.
 #
 #   export TELEPORT_PROXY=<your-tenant>.beams.run:443
-#   export TELEPORT_TOKEN=$(tctl tokens add --type=node,app --ttl=4h --format=text)
+#   export TELEPORT_TOKEN=$(tctl tokens add --type=node,app --ttl=1h --format=text)
 #   PARALLEL=1 ./deploy.sh                   # all nodes at once (logs in ./logs/)
+#   tctl tokens rm "$TELEPORT_TOKEN"         # once tsh ls shows every node: they hold their own certificates now
 #   ./deploy.sh pi4                          # one node, interactive
 #   EXTRA="--real" ./deploy.sh pi4           # real hardware on pi4
 #
 # Env: SSH_USER (unset = use host alias as-is; set = user@ip), ROBOT (default beambot-sim),
 #      EXTRA (extra setup_pi.sh flags), PARALLEL=1
+# The join token goes to each Pi over ssh's stdin into a 0600 file, never on a command line (ps, sudo's log).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -36,17 +38,21 @@ COPYFILE_DISABLE=1 tar $TAR_FLAGS -czf "$KIT" --exclude='__pycache__' --exclude=
 mkdir -p logs
 
 deploy_one() {
-  local host=$1 ip=$2 role=$3 target peers
+  local host=$1 ip=$2 role=$3 target peers token_arg=""
   target=$([[ -n "${SSH_USER:-}" ]] && echo "$SSH_USER@$ip" || echo "$host")
   peers=$(echo "$ALL_IPS" | grep -vx "$ip" | paste -sd, -)
   ssh "$target" "mkdir -p $STAGE"
   scp -q "$KIT" "$target:$STAGE.tgz"
+  if [[ -n "${TELEPORT_TOKEN:-}" ]]; then
+    printf '%s' "$TELEPORT_TOKEN" | ssh "$target" "rm -f $STAGE.token && umask 077 && cat > $STAGE.token"
+    token_arg="--token-file $STAGE.token"
+  fi
   # shellcheck disable=SC2029
   ssh $([[ $PARALLEL == 1 ]] || echo -t) "$target" \
-    "set -e; rm -rf $STAGE && mkdir -p $STAGE && tar -xzf $STAGE.tgz -C $STAGE && rm -f $STAGE.tgz && \
+    "trap 'rm -f $STAGE.token' EXIT; set -e; rm -rf $STAGE && mkdir -p $STAGE && tar -xzf $STAGE.tgz -C $STAGE && rm -f $STAGE.tgz && \
      SUDO=\$([ \"\$(id -u)\" -eq 0 ] || echo sudo); \
      \$SUDO bash $STAGE/setup_pi.sh --role $role --robot $ROBOT --proxy $TELEPORT_PROXY \
-       ${TELEPORT_TOKEN:+--token $TELEPORT_TOKEN} --peers $peers $EXTRA"
+       $token_arg --peers $peers $EXTRA"
 }
 
 pids=""
@@ -68,4 +74,5 @@ for p in $pids; do
 done
 
 echo -e "\nCheck:  tsh ls robot=$ROBOT   and   tsh mcp ls robot=$ROBOT -v"
+[[ -z "${TELEPORT_TOKEN:-}" ]] || echo 'Then revoke the join token:  tctl tokens rm "$TELEPORT_TOKEN"'
 exit $rc

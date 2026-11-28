@@ -4,11 +4,12 @@ Run on a laptop (not needed on the Pis):
   pip install "mcp>=1.10,<2"
   python3 tests/test_mcp_client.py          # official-SDK server (default)
   python3 tests/test_mcp_client.py stdlib   # zero-dependency fallback server
-Starts all 5 roles locally in sim mode on ports 8101-8105.
+Starts all 5 roles locally in sim mode on free ports, so two runs on one machine don't collide.
 """
 import asyncio
 import base64
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -18,8 +19,23 @@ from mcp.client.streamable_http import streamablehttp_client
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "pi")
 ROLES = ["safety", "vision", "drive", "arm", "sensors"]
-PORTS = {r: 8101 + i for i, r in enumerate(ROLES)}
 failures = []
+
+
+def free_ports(n, kind=socket.SOCK_STREAM):
+    """n distinct ports nothing is bound to right now (all held open until every one is picked)."""
+    socks = [socket.socket(socket.AF_INET, kind) for _ in range(n)]
+    try:
+        for s in socks:
+            s.bind(("", 0))
+        return [s.getsockname()[1] for s in socks]
+    finally:
+        for s in socks:
+            s.close()
+
+
+PORTS = dict(zip(ROLES, free_ports(len(ROLES))))
+ESTOP_PORT = free_ports(1, socket.SOCK_DGRAM)[0]
 
 
 def check(cond, msg):
@@ -95,7 +111,7 @@ async def main():
 if __name__ == "__main__":
     impl = sys.argv[1] if len(sys.argv) > 1 else "sdk"
     print(f"== testing MCP_IMPL={impl}")
-    env = dict(os.environ, MCP_IMPL=impl, ROBOT_SIM="1", ESTOP_PORT="47999",
+    env = dict(os.environ, MCP_IMPL=impl, ROBOT_SIM="1", ESTOP_PORT=str(ESTOP_PORT),
                ESTOP_BROADCAST="127.255.255.255", ESTOP_PEERS="127.0.0.1", LOG_LEVEL="WARNING")
     procs = [subprocess.Popen([sys.executable, "-m", "robot_mcp"], cwd=ROOT,
                               env=dict(env, ROBOT_ROLE=r, MCP_PORT=str(p)))

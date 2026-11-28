@@ -109,8 +109,8 @@ def call_tool(name, arguments, caller):
     try:
         args = registry.validate(t["inputSchema"], arguments)
         if name.startswith("act_"):
-            safety.require_armed()
             with _call_lock:
+                safety.require_armed()  # checked after the wait: a call queued behind a STOP must not run
                 out = t["fn"](**args)
         else:
             kw = dict(args)
@@ -152,8 +152,9 @@ def make_handler(instructions, path="/mcp"):
 
         def do_GET(self):
             if self.path.startswith("/healthz"):
-                return self._send(200, {"ok": True, "role": os.environ.get("ROBOT_ROLE"),
-                                        "estop": safety.state()})
+                up = safety.listener_up()  # a node deaf to the e-stop mesh is not healthy
+                return self._send(200 if up else 503, {"ok": up, "role": os.environ.get("ROBOT_ROLE"),
+                                                       "estop": safety.state(), "estop_listener": up})
             # We don't offer a server->client SSE stream; spec says 405 is fine.
             self._send(405, None, {"Allow": "POST, DELETE"})
 

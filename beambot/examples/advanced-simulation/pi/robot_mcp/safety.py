@@ -22,6 +22,7 @@ MAX_MOTION_MS = int(os.environ.get("MAX_MOTION_MS", "2000"))
 _lock = threading.Lock()
 _state = {"estopped": False, "reason": None, "since": None, "source": None}
 _stop_hooks = []
+_listener = {"up": False}  # True only while the e-stop listener is bound and its thread alive
 
 
 def register_stop_hook(fn):
@@ -59,9 +60,18 @@ def state():
         return dict(_state)
 
 
+def listener_up():
+    return _listener["up"]
+
+
 def require_armed():
     from .registry import ToolError
 
+    if not _listener["up"]:
+        raise ToolError(
+            f"The e-stop listener (udp/{ESTOP_PORT}) is not running on this node, so a STOP from another node "
+            "would not reach it. Actuation refused. Check this node's log."
+        )
     s = state()
     if s["estopped"]:
         raise ToolError(
@@ -107,25 +117,34 @@ def start_listener():
             log.error("cannot bind e-stop listener on %d: %s", ESTOP_PORT, e)
             return
         log.info("e-stop listener on udp/%d", ESTOP_PORT)
-        while True:
-            data, addr = s.recvfrom(512)
-            if data.startswith(ESTOP_MAGIC):
-                reason = data[len(ESTOP_MAGIC) + 1 :].decode(errors="replace") or "remote"
-                trip(reason, source=f"lan:{addr[0]}", broadcast=False)
+        _listener["up"] = True
+        try:
+            while True:
+                data, addr = s.recvfrom(512)
+                if data.startswith(ESTOP_MAGIC):
+                    reason = data[len(ESTOP_MAGIC) + 1 :].decode(errors="replace") or "remote"
+                    trip(reason, source=f"lan:{addr[0]}", broadcast=False)
+        finally:
+            _listener["up"] = False
 
     threading.Thread(target=loop, name="estop-listener", daemon=True).start()
 
 
 def timed(duration_ms, start_fn, stop_fn):
-    """Run start_fn now and stop_fn after duration_ms (clamped). Blocks until done."""
+    """Run start_fn now and stop_fn after duration_ms (clamped). Blocks until done.
+
+    Returns the ms the motion really ran: less than asked when an e-stop cut it short."""
     duration_ms = max(0, min(int(duration_ms), MAX_MOTION_MS))
+    ran_ms = duration_ms
     try:
         # start_fn is inside the try: if it fails half way (the first motor written, the second not), stop_fn
         # still runs and de-energizes whatever did start.
         start_fn()
-        deadline = time.monotonic() + duration_ms / 1000.0
+        started = time.monotonic()
+        deadline = started + duration_ms / 1000.0
         while time.monotonic() < deadline:
             if state()["estopped"]:
+                ran_ms = int((time.monotonic() - started) * 1000)
                 break
             time.sleep(0.02)
     finally:
@@ -135,4 +154,4 @@ def timed(duration_ms, start_fn, stop_fn):
             log.exception("stop_fn failed, retrying")
             time.sleep(0.05)
             stop_fn()
-    return duration_ms
+    return ran_ms

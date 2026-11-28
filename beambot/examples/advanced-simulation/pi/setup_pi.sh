@@ -6,13 +6,14 @@
 #     (falls back to the zero-dependency stdlib server if the SDK can't be installed)
 #
 # Usage (as root, from the directory containing this script; deploy.sh does this for you):
-#   sudo ./setup_pi.sh --role arm --proxy <your-tenant>.beams.run:443 --token <join-token> \
+#   sudo ./setup_pi.sh --role arm --proxy <your-tenant>.beams.run:443 --token-file <file holding the join token> \
 #        [--robot beambot-sim] [--real] [--peers <ip>,<ip>,...] [--full-upgrade] [--reset-teleport]
+# --token-file is read, then deleted. (--token <join-token> still works, but puts the token in ps and sudo's log.)
 #
 # Tested on Arch Linux ARM (armv7). Other distros need the package-install lines adapted.
 set -euo pipefail
 
-ROLE="" PROXY="" TOKEN="" ROBOT="beambot-sim" SIM=1 PEERS="" FULL_UPGRADE=0 RESET=0
+ROLE="" PROXY="" TOKEN="" TOKEN_FILE="" ROBOT="beambot-sim" SIM=1 PEERS="" FULL_UPGRADE=0 RESET=0
 TELEPORT_VERSION="${TELEPORT_VERSION:-18.11.1}"  # keep it equal to (or older than) your cluster's version
 TELEPORT_PKG="${TELEPORT_PKG:-teleport-ent}"     # Teleport Cloud tenants use the enterprise build
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,6 +23,7 @@ while [[ $# -gt 0 ]]; do
     --role) ROLE="$2"; shift 2 ;;
     --proxy) PROXY="$2"; shift 2 ;;
     --token) TOKEN="$2"; shift 2 ;;
+    --token-file) TOKEN_FILE="$2"; shift 2 ;;
     --robot) ROBOT="$2"; shift 2 ;;
     --real) SIM=0; shift ;;
     --peers) PEERS="$2"; shift 2 ;;
@@ -33,6 +35,12 @@ done
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+if [[ -n "$TOKEN_FILE" ]]; then
+  [[ -r "$TOKEN_FILE" ]] || die "cannot read --token-file $TOKEN_FILE"
+  TOKEN="$(cat "$TOKEN_FILE")"
+  rm -f "$TOKEN_FILE"   # read once: don't leave the token lying in /var/tmp
+fi
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo)"
 [[ "$ROLE" =~ ^(safety|vision|drive|arm|sensors)$ ]] || die "--role must be safety|vision|drive|arm|sensors"

@@ -45,7 +45,7 @@ motion, e-stop, a real PNG "camera frame") without wiring anything. Want one rea
 
 ```bash
 pip install "mcp>=1.10,<2"
-python3 tests/test_mcp_client.py          # official-SDK server, all five roles on ports 8101-8105
+python3 tests/test_mcp_client.py          # official-SDK server, all five roles on free local ports
 python3 tests/test_mcp_client.py stdlib   # zero-dependency fallback server
 ```
 
@@ -60,18 +60,19 @@ Beams, and `tsh`/`tctl` on your laptop. The installer is tested on Arch Linux AR
 package-install lines in `pi/setup_pi.sh` adapted.
 
 ```bash
-# 1. Roles and a join token
+# 1. Roles and a short-lived join token (deploy.sh hands it to each Pi over ssh's stdin, never on a command line)
 tctl create -f teleport/roles.yaml
 export TELEPORT_PROXY=<your-tenant>.beams.run:443
-export TELEPORT_TOKEN=$(tctl tokens add --type=node,app --ttl=4h --format=text)
+export TELEPORT_TOKEN=$(tctl tokens add --type=node,app --ttl=1h --format=text)
 
 # 2. Tell deploy.sh about your Pis, then deploy (PARALLEL=1 for all at once, logs in ./logs/)
 cp cluster.conf.example cluster.conf && $EDITOR cluster.conf
 PARALLEL=1 ./deploy.sh                  # or ./deploy.sh pi4 for one node
 
-# 3. Check
+# 3. Check, then revoke the token: every node that joined holds its own certificates now
 tsh ls robot=beambot-sim                # five SSH nodes
 tsh mcp ls robot=beambot-sim -v         # five MCP servers and the tools *you* are allowed
+tctl tokens rm "$TELEPORT_TOKEN" && unset TELEPORT_TOKEN
 ```
 
 `setup_pi.sh` syncs the clock, installs Teleport, creates a `robot` user, installs the MCP server
