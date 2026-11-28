@@ -192,7 +192,9 @@ because the app never gives it `resume`). Resume works through the stream app (`
   Video and telemetry keep flowing during the write.
 - **STOP always answers.** The dashboard sends both stops at once and gives up on the stream app after
   `STREAM_STOP_TIMEOUT_S` (2 s) and on the MCP stop after `MCP_STOP_TIMEOUT_S` (5 s). If neither got through, the
-  page shows STOP FAILED, so you know to cut the power.
+  page shows STOP FAILED, so you know to cut the power. Each STOP sends its own MCP stop; while
+  `MAX_MCP_STOPS_IN_FLIGHT` (3) earlier ones are still waiting for the robot, a new STOP skips the MCP route and relies
+  on the stream app. That one is a constant in `app.py`, not an environment variable.
 - **Resume waits.** A drive sent just before STOP can still be on its way. Resume answers 409 until robot calls started
   before STOP have finished, and for `RESUME_SETTLE_S` (5 s) after a STOP that found calls in flight. Press it again.
 - **A refused drive is an error.** The robot's latch refuses `drive` as a tool error, so the dashboard answers 423 and
@@ -236,12 +238,12 @@ Robot calls appear in the audit log as you plus the beam's workload identity. A 
 **Who can open the published URL?** It is a Teleport-protected app, so a visitor signs in to Teleport first. The Teleport
 docs say a beam is single-user and only its creator can open it, and published apps carry a `teleport.internal/beam/owner`
 label that the built-in `beam-user` role matches against the user's own name. So by default the dashboard is a private
-control panel for whoever created the beam. We checked this in a production beam: only the creator could open the
-published app. Another user can only open it with two grants they don't get by default: the right to view the creator's
-beams, and a role that matches one of Teleport's built-in beam app labels. Most of those labels change from beam to
-beam, but the owner label is the creator's username, so a role that names it (for example
-`teleport.internal/beam/owner: <creator>`) covers all of that user's beams. The docs don't describe sharing it. If you do
-share it that way, remember that the dashboard has no login of its own and acts with the *beam's roles*, not
+control panel for whoever created the beam. We checked this in a production beam: the creator could open the published
+app, and other users could not. We have not tested what lets another user in. The
+[Beams docs](https://goteleport.com/docs/beams/) say "You can even share your app with others by publishing it to the
+Teleport cluster", but not which grants that takes. Our untested guess: the right to view the creator's beams, plus a
+role that matches the beam's app labels. Most of those labels change from beam to beam, but the owner label is the
+creator's username (`teleport.internal/beam/owner: <creator>`). If you do share it, remember that the dashboard has no login of its own and acts with the *beam's roles*, not
 the visitor's: everyone who gets in can drive, stop and resume. Check who can open it on your cluster before you share
 the link.
 

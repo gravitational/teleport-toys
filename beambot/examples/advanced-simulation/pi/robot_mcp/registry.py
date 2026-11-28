@@ -4,7 +4,7 @@ Naming convention is load-bearing: Teleport RBAC filters MCP tools by name.
   sense_*   read-only (camera, sensors, status)        -> beambot-sim-observer
   act_*     moves hardware                             -> beambot-sim-operator
   safety_*  can only make the robot safer (stop/estop) -> everyone
-  admin_*   clears e-stop / changes limits             -> beambot-sim-admin
+  admin_*   clears the e-stop                          -> beambot-sim-admin
 """
 import json
 import math

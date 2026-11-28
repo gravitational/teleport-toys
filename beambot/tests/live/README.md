@@ -6,7 +6,7 @@ The hermetic suite (`make test`) uses a fake `tsh`, so it proves our scripts and
 Run them **inside a beam** (or anywhere `tsh status` shows an active session):
 
 ```bash
-tsh beams add --roles picar-driver        # roles must be eligible for delegation
+tsh beams add --roles beam-user,picar-driver   # roles must be eligible for delegation; beam-user lets it call models
 tsh beams ssh <beam>
 git clone https://github.com/gravitational/teleport-toys && cd teleport-toys/beambot
 python3 -m pip install --user --break-system-packages -r tests/requirements.txt   # beams have no python3-venv
@@ -31,18 +31,20 @@ tries to reach the robot's MCP app as plain HTTP through `tsh proxy app`, listin
 the MCP tool filter. It also confirms the video/telemetry app does not serve `/mcp`. `RESULT: PASS` means the
 beam could not see or call `resume` that way. Set `FORBIDDEN=drive` to check a trimmed copy of the role. Run it again after changing roles.
 
-It never passes on silence. **PASS** (exit 0) needs Teleport's own denial of the `resume` call, with `resume` missing from
-the tool list and the role's own tools still there. **FAIL** (exit 1) means `resume` was listed or the call reached the
-robot, even if the robot then refused it (for example because its latch was set). Everything else, such as no proxy, no
+It never passes on silence. **PASS** (exit 0) needs Teleport's own RBAC denial of the `resume` call ("RBAC is enforced
+by your Teleport roles"), with `resume` missing from the tool list and the role's own tools still there. **FAIL** (exit 1)
+means `resume` was listed (in any letter case) or the call reached the robot, even if the robot then refused it. Everything else, such as no proxy, no
 answer, a list that doesn't look like this robot's, or an error that isn't Teleport's, is **INCONCLUSIVE** (exit 2). The stream
 app check is **SKIPPED** from a beam without it, because the driver role can't see `picar-stream`; `REQUIRE_STREAM=1` turns a skip
 into INCONCLUSIVE, and the line `checks: N passed, N failed, ...` says what ran.
 
-The check never lifts a STOP on purpose. It calls `get_telemetry` first and sends the real `resume` only when the robot
-says `halted: false`. If the robot is latched, or the latch can't be read, it skips the call and reports INCONCLUSIVE:
-resume from the dashboard and run it again. If the tool list already shows `resume`, that is a FAIL and it isn't called.
-A STOP pressed in the few milliseconds between the two calls could still be cleared if the bypass is open, so don't run
-the check while someone may need the STOP.
+The check can't lift a STOP. Its one call sends `resume` with `"arguments": "not-an-object"`. Teleport checks the tool
+name before the robot sees the arguments, so a role without `resume` gets Teleport's denial. A call that gets past
+Teleport is refused by the robot's MCP server ("Invalid request parameters") before any tool runs, and the check
+reports that as FAIL. If Teleport itself ever refused the malformed arguments, its answer would not be the RBAC message,
+so the check would say INCONCLUSIVE, never PASS. If the tool list already shows `resume`, that is a FAIL and it isn't
+called. It needs `PORT` and `PORT+1` (default 18443 and 18444) free, and says INCONCLUSIVE if another program already
+listens there.
 
 ```bash
 bash tests/live/check_mcp_bypass.sh            # [mcp-app] [stream-app], defaults picar-mcp picar-stream

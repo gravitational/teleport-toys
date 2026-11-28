@@ -30,7 +30,7 @@ motion, e-stop, a real PNG "camera frame") without wiring anything. Want one rea
 |---|---|---|
 | `sense_*` | read-only (camera, distance, IMU, status) | `beambot-sim-observer` |
 | `act_*` | moves hardware (drive, turn, arm, gripper) | `beambot-sim-operator` |
-| `admin_*` | reset e-stop, change limits | `beambot-sim-admin` |
+| `admin_*` | reset the e-stop (`admin_reset_estop`) | `beambot-sim-admin` |
 | `safety_*` | stop. Everyone, always. | all |
 
 | Node | Tools |

@@ -91,9 +91,9 @@ bot or tbot setup; Postgres (`SELECT 1`) and Redis (`PING`, `protocol=2`) work t
 the dashboard connects to the robot over MCP, runs the agent loop and writes its activity feed to Redis through
 Teleport. `tsh mcp connect` and `tsh proxy mcp` work from a least-privilege beam against an MCP app served by a
 Teleport agent in Kubernetes, and the dashboard drives that robot through the tunnel. Claude Code inside the beam
-calls models once the beam has the `beam-user` role. Only the beam's creator could open its published app; another user
-needs the right to view the creator's beams plus a role matching Teleport's beam owner label (see
-`examples/picar-beambot/README.md`, "Who can open the published URL?").
+calls models once the beam has the `beam-user` role. The beam's creator could open its published app and other users
+could not; what would let another user in is untested (see `examples/picar-beambot/README.md`, "Who can open the
+published URL?").
 `tests/live/check_mcp_bypass.sh` checks that opening the robot's MCP app as plain HTTP with `tsh proxy app` doesn't
 skip the tool filter: a `picar-driver` beam must not be able to list or call `resume`. It reports `INCONCLUSIVE`,
 not a pass, when it can't see Teleport's denial, and it has not been run against a cluster with that role yet.
@@ -101,7 +101,7 @@ not a pass, when it can't see Teleport's denial, and it has not been run against
 ## Tests
 
 ```bash
-make setup && make test        # about 5 min, no cluster needed
+make setup && make test        # about 8 min on our test machine, no cluster needed
 make test-live                 # inside a real beam: proves MCP, tunnels and databases against real Teleport
 ```
 
@@ -112,7 +112,7 @@ shows your cluster is.
 ## Layout
 
 ```
-beam-mcp-setup/            the skill: SKILL.md, scripts/, references/, assets/
+beam-mcp-setup/            the skill: SKILL.md, scripts/, references/
 examples/
   picar-beambot/           robot/ (MCP server, Teleport + systemd config), beam-app/ (dashboard), teleport/ (roles),
                            k8s/ (the simulated robot + Teleport agent for a Kubernetes cluster)
