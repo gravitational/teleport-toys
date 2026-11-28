@@ -31,6 +31,8 @@ def main():
     importlib.import_module(f".roles.{role}", __package__)
 
     safety.start_listener()
+    if role == "safety":
+        safety.start_heartbeat()  # the other nodes refuse to move when they stop hearing it
 
     def shutdown(*_):
         safety.stop_all_local()

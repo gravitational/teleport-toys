@@ -152,9 +152,12 @@ def make_handler(instructions, path="/mcp"):
 
         def do_GET(self):
             if self.path.startswith("/healthz"):
-                up = safety.listener_up()  # a node deaf to the e-stop mesh is not healthy
+                # a node deaf to the e-stop mesh, or not hearing the safety node, is not healthy
+                listening, heard = safety.listener_up(), safety.heartbeat_ok()
+                up = listening and heard
                 return self._send(200 if up else 503, {"ok": up, "role": os.environ.get("ROBOT_ROLE"),
-                                                       "estop": safety.state(), "estop_listener": up})
+                                                       "estop": safety.state(), "estop_listener": listening,
+                                                       "safety_heartbeat": heard})
             # We don't offer a server->client SSE stream; spec says 405 is fine.
             self._send(405, None, {"Allow": "POST, DELETE"})
 

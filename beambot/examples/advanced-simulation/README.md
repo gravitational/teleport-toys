@@ -21,7 +21,8 @@ motion, e-stop, a real PNG "camera frame") without wiring anything. Want one rea
    safety     vision     drive      arm          sensors
    e-stop     camera     motors     servos       distance/IMU
    └─ each: teleport (ssh + app_service) → mcp+http://127.0.0.1:8000/mcp
-   └─ LAN UDP e-stop mesh: any node (or a button) latches STOP on all nodes, no cloud needed
+   └─ LAN UDP e-stop mesh: any node (or a button) latches STOP on all nodes, no cloud needed;
+      no heartbeat from the safety node, no motion
 ```
 
 ## Tiers
@@ -56,24 +57,30 @@ latches STOP.
 ## On five Pis
 
 **You need:** five Raspberry Pi 3 (32-bit Arch Linux ARM, SSH aliases `pi1`…`pi5`), a Teleport cluster with
-Beams, and `tsh`/`tctl` on your laptop. The installer is tested on Arch Linux ARM; other distros need the
+Beams, and `tsh`, `tctl` and `python3` on your laptop. The installer is tested on Arch Linux ARM; other distros need the
 package-install lines in `pi/setup_pi.sh` adapted.
 
 ```bash
-# 1. Roles and a short-lived join token (deploy.sh hands it to each Pi over ssh's stdin, never on a command line)
+# 1. Roles
 tctl create -f teleport/roles.yaml
 export TELEPORT_PROXY=<your-tenant>.beams.run:443
-export TELEPORT_TOKEN=$(tctl tokens add --type=node,app --ttl=1h --format=text)
 
 # 2. Tell deploy.sh about your Pis, then deploy (PARALLEL=1 for all at once, logs in ./logs/)
 cp cluster.conf.example cluster.conf && $EDITOR cluster.conf
 PARALLEL=1 ./deploy.sh                  # or ./deploy.sh pi4 for one node
 
-# 3. Check, then revoke the token: every node that joined holds its own certificates now
+# 3. Check
 tsh ls robot=beambot-sim                # five SSH nodes
 tsh mcp ls robot=beambot-sim -v         # five MCP servers and the tools *you* are allowed
-tctl tokens rm "$TELEPORT_TOKEN" && unset TELEPORT_TOKEN
 ```
+
+`deploy.sh` makes its own join token: a 1-hour `node,app` token from `tctl`. The token reaches each Pi over ssh's
+stdin into a 0600 file, never on a command line. Each Pi reports the Teleport host ID it joins under. Once every
+Pi it deployed is listed under that ID as both an SSH node and an MCP app (`tctl get nodes`, `tctl get app_server`),
+`deploy.sh` revokes the token. An old record with the same name, from a replaced or reset Pi, doesn't count. When
+a deploy fails, a Pi's host ID can't be read, or a node hasn't shown up after `JOIN_TIMEOUT` seconds (default
+300), it leaves the token in place, says why and prints the `tctl tokens rm` command. To use a token you already
+have, `export TELEPORT_TOKEN=...`: `deploy.sh` then neither creates nor revokes one, and removing it is up to you.
 
 `setup_pi.sh` syncs the clock, installs Teleport, creates a `robot` user, installs the MCP server
 (official SDK, with an automatic stdlib fallback) and starts it as `beambot-sim.service` on `127.0.0.1:8000`.
@@ -82,6 +89,24 @@ It also writes a unicast `ESTOP_PEERS` list, because Wi-Fi client isolation can 
 **Real hardware later:** wire it, then `EXTRA="--real" ./deploy.sh pi4` (one node at a time). Joint limits live in
 `pi/robot_mcp/roles/arm.py`; PCA9685 drive channels are set with `DRIVE_CHANNELS`. The real-hardware code paths
 are **untested**: treat them as a starting point.
+
+## E-stop mesh and heartbeat
+
+Every node listens on UDP `ESTOP_PORT` (47474). A `safety_stop` on any node, or the button on the safety node,
+latches STOP on all of them. The safety node also sends a heartbeat on that port every `ESTOP_HEARTBEAT_MS`
+(500 ms). A node that hasn't heard one for `ESTOP_HEARTBEAT_TIMEOUT_MS` (3000 ms), or whose listener isn't running,
+refuses every `act_*` tool and answers `/healthz` with 503. `sense_*`, `safety_*` and `admin_*` tools keep
+working. So a safety node that crashed, lost power or dropped off the Wi-Fi stops the robot, instead of leaving it
+moving with a dead button. Motion is allowed again as soon as the heartbeat is back; a latched STOP still needs
+`admin_reset_estop`. A motion already running when the heartbeat goes quiet still ends at its own time limit
+(at most `MAX_MOTION_MS`, 2 s).
+
+Both settings are in `/etc/beambot-sim.env` on each Pi. Keep the timeout several heartbeats long: UDP over Wi-Fi
+drops packets. A drive or arm node running without a safety node won't move, and neither will one whose safety
+node runs code older than the heartbeat: deploy the safety node too. The heartbeat carries the robot's name
+(`ROBOT_NAME`, from `--robot`), so a second robot's safety node on the same LAN doesn't count. A STOP packet
+carries no name and stops every robot on the port. Like STOP, the heartbeat isn't authenticated. It tells the nodes
+the safety node is alive; it doesn't decide who may move the robot (Teleport does).
 
 ## Put an agent in a beam
 

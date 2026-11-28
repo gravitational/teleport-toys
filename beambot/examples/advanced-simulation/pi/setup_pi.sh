@@ -9,11 +9,12 @@
 #   sudo ./setup_pi.sh --role arm --proxy <your-tenant>.beams.run:443 --token-file <file holding the join token> \
 #        [--robot beambot-sim] [--real] [--peers <ip>,<ip>,...] [--full-upgrade] [--reset-teleport]
 # --token-file is read, then deleted. (--token <join-token> still works, but puts the token in ps and sudo's log.)
+# --host-id-file <path>: write this Pi's Teleport host ID there at the end (deploy.sh waits for it to join).
 #
 # Tested on Arch Linux ARM (armv7). Other distros need the package-install lines adapted.
 set -euo pipefail
 
-ROLE="" PROXY="" TOKEN="" TOKEN_FILE="" ROBOT="beambot-sim" SIM=1 PEERS="" FULL_UPGRADE=0 RESET=0
+ROLE="" PROXY="" TOKEN="" TOKEN_FILE="" HOST_ID_FILE="" ROBOT="beambot-sim" SIM=1 PEERS="" FULL_UPGRADE=0 RESET=0
 TELEPORT_VERSION="${TELEPORT_VERSION:-18.11.1}"  # keep it equal to (or older than) your cluster's version
 TELEPORT_PKG="${TELEPORT_PKG:-teleport-ent}"     # Teleport Cloud tenants use the enterprise build
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,6 +25,7 @@ while [[ $# -gt 0 ]]; do
     --proxy) PROXY="$2"; shift 2 ;;
     --token) TOKEN="$2"; shift 2 ;;
     --token-file) TOKEN_FILE="$2"; shift 2 ;;
+    --host-id-file) HOST_ID_FILE="$2"; shift 2 ;;
     --robot) ROBOT="$2"; shift 2 ;;
     --real) SIM=0; shift ;;
     --peers) PEERS="$2"; shift 2 ;;
@@ -43,6 +45,7 @@ if [[ -n "$TOKEN_FILE" ]]; then
 fi
 
 [[ $EUID -eq 0 ]] || die "run as root (sudo)"
+[[ -z "$HOST_ID_FILE" ]] || rm -f "$HOST_ID_FILE"   # never leave an earlier run's ID for deploy.sh to read
 [[ "$ROLE" =~ ^(safety|vision|drive|arm|sensors)$ ]] || die "--role must be safety|vision|drive|arm|sensors"
 [[ -n "$PROXY" ]] || die "--proxy is required (e.g. <your-tenant>.beams.run:443)"
 [[ "$(uname -m)" == armv7l ]] || echo "WARN: expected armv7l, got $(uname -m)"
@@ -115,12 +118,15 @@ python -m venv /opt/beambot-sim/venv
 
 cat > /etc/beambot-sim.env <<ENV
 ROBOT_ROLE=$ROLE
+ROBOT_NAME=$ROBOT
 ROBOT_SIM=$SIM
 MCP_IMPL=$MCP_IMPL
 MCP_HOST=127.0.0.1
 MCP_PORT=8000
 ESTOP_PORT=47474
 ESTOP_PEERS=$PEERS
+ESTOP_HEARTBEAT_MS=500
+ESTOP_HEARTBEAT_TIMEOUT_MS=3000
 MAX_MOTION_MS=2000
 LOG_LEVEL=INFO
 ENV
@@ -182,6 +188,13 @@ journalctl -u teleport -n 15 --no-pager || true
 echo
 echo "Node '$NAME' done. From your laptop:  tsh ls robot=$ROBOT  and  tsh mcp ls robot=$ROBOT"
 [[ $REBOOT_NEEDED -eq 1 ]] && echo "NOTE: I2C was just enabled in $CONFIG_TXT -> reboot before using real hardware."
+if [[ -n "$HOST_ID_FILE" ]]; then
+  # The ID this Teleport process joins under: deploy.sh waits for it, not just for a node with this name (an old
+  # record of a replaced or reset Pi can still be listed for a while).
+  for _ in $(seq 1 30); do [[ -s /var/lib/teleport/host_uuid ]] && break; sleep 1; done
+  install -m 0644 /var/lib/teleport/host_uuid "$HOST_ID_FILE" 2>/dev/null \
+    || echo "WARN: /var/lib/teleport/host_uuid not there yet: deploy.sh will leave the join token in place"
+fi
 # The staged kit is no longer needed (robot_mcp lives in /opt/beambot-sim now).
 case "$SRC_DIR" in /var/tmp/beambot-sim*) rm -rf "$SRC_DIR" ;; esac
 exit 0

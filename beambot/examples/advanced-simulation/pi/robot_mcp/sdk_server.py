@@ -88,9 +88,12 @@ def serve(host, port, instructions):
             await manager.handle_request(scope, receive, send)
 
     async def healthz(_request):
-        up = safety.listener_up()  # a node deaf to the e-stop mesh is not healthy
+        # a node deaf to the e-stop mesh, or not hearing the safety node, is not healthy
+        listening, heard = safety.listener_up(), safety.heartbeat_ok()
+        up = listening and heard
         return JSONResponse({"ok": up, "impl": "sdk", "role": os.environ.get("ROBOT_ROLE"),
-                             "estop": safety.state(), "estop_listener": up}, status_code=200 if up else 503)
+                             "estop": safety.state(), "estop_listener": listening, "safety_heartbeat": heard},
+                            status_code=200 if up else 503)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
